@@ -27,6 +27,10 @@ pip install --upgrade pip > /dev/null 2>&1
 echo "✓ Installing dependencies..."
 pip install -e ".[dev]" > /dev/null 2>&1
 
+# Install headless browser for automated app updates (phonemaster update / check-updates)
+echo "✓ Installing Playwright's Chromium (used to fetch update APKs)..."
+playwright install chromium > /dev/null 2>&1
+
 # Check ADB
 echo "✓ Checking ADB installation..."
 if ! command -v adb &> /dev/null; then

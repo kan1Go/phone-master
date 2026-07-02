@@ -39,6 +39,13 @@ This installs:
 - Main dependencies (click, requests, etc.)
 - Dev dependencies (pytest, black, flake8, mypy)
 
+Then install the headless browser used by `phonemaster update` / `check-updates`
+to fetch APKs from Uptodown:
+
+```bash
+playwright install chromium
+```
+
 ## Step 5: Verify Installation
 
 ```bash
