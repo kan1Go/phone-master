@@ -9,12 +9,44 @@ import requests
 from typing import Optional
 from tabulate import tabulate
 from colorama import Fore, Style
+from wcwidth import wcswidth, wcwidth as _wcwidth
 from .adb import ADBManager
 from .adb.app_names import AppNameResolver
 from .app_stores import AppStoreManager
 from .app_stores.uptodown import UptodownStore
 from .config import Config
 from .models import AppSource
+
+# Google's brand colors, cycled to highlight apps Google Play can't manage.
+GOOGLE_COLORS = [
+    (66, 133, 244),   # blue
+    (234, 67, 53),    # red
+    (251, 188, 5),    # yellow
+    (52, 168, 83),    # green
+]
+
+
+def _google_color(index: int) -> str:
+    r, g, b = GOOGLE_COLORS[index % len(GOOGLE_COLORS)]
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _truncate(text: str, max_width: int) -> str:
+    """Truncate text to a max display width, accounting for wide (CJK) characters."""
+    if wcswidth(text) <= max_width:
+        return text
+
+    ellipsis = "…"
+    budget = max_width - wcswidth(ellipsis)
+    width = 0
+    result = []
+    for ch in text:
+        ch_width = max(_wcwidth(ch), 0)
+        if width + ch_width > budget:
+            break
+        result.append(ch)
+        width += ch_width
+    return "".join(result) + ellipsis
 
 
 def _run_with_spinner(message: str, func, *args, **kwargs):
@@ -135,19 +167,28 @@ def list_apps(ctx, source, all_apps):
         # Prepare table data - flag apps Google Play can't manage (sideloaded)
         table_data = [
             [
-                names.get(app.package_name, app.package_name),
-                app.package_name,
+                _truncate(names.get(app.package_name, app.package_name), 40),
                 app.version,
                 "" if app.source == AppSource.GOOGLE_PLAY else "not on Play"
             ]
             for app in apps
         ]
 
-        click.echo(tabulate(
-            table_data,
-            headers=["Name", "Package", "Version", ""],
-            tablefmt="simple"
-        ))
+        table_str = tabulate(table_data, headers=["Name", "Version", ""], tablefmt="simple")
+
+        # Highlight not-on-Play rows using Google's brand colors, cycled per row.
+        # Colored after formatting (not in the cells) since tabulate counts ANSI
+        # escape codes toward column width and would otherwise misalign columns.
+        lines = table_str.split("\n")
+        color_index = 0
+        for i, line in enumerate(lines):
+            data_row = i - 2  # header + separator line precede the data rows
+            if 0 <= data_row < len(apps) and apps[data_row].source != AppSource.GOOGLE_PLAY:
+                click.echo(f"{_google_color(color_index)}{line}{Style.RESET_ALL}")
+                color_index += 1
+            else:
+                click.echo(line)
+
         sideload_count = sum(1 for app in apps if app.source != AppSource.GOOGLE_PLAY)
         click.echo(f"\n{Fore.GREEN}Total: {len(apps)} apps{Style.RESET_ALL} ({sideload_count} not manageable via Google Play)")
     
