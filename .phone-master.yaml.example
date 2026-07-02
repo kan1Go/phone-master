@@ -1,0 +1,48 @@
+"""Sample configuration file for phone-master."""
+
+# ADB configuration
+adb_path: adb
+device_serial: null  # Set to device serial number if needed, or null for auto-detect
+
+# Update checking
+check_updates_interval: 3600  # seconds
+auto_update: false  # Set to true to automatically update apps
+
+# Directories
+download_dir: ./downloads
+cache_dir: ./cache
+
+# App stores configuration
+chinese_stores:
+  coolapk: https://www.coolapk.com
+  appchina: https://www.appchina.com
+  anzhuo: https://www.anzhuo.cn
+
+# Apps to manage - Add or remove as needed
+managed_apps:
+  - package_name: com.qiwu.app
+    app_name: 小宇宙
+    sources:
+      - apkpure
+      - chinese_store
+    auto_update: true
+
+  - package_name: com.volcengine.live
+    app_name: 豆包
+    sources:
+      - google_play
+      - apkpure
+    auto_update: true
+
+  - package_name: com.ss.android.ugc.aweme
+    app_name: 抖音（国内版）
+    sources:
+      - chinese_store
+    auto_update: true
+
+  - package_name: com.gotokeep.app
+    app_name: Keep健身国内版
+    sources:
+      - chinese_store
+      - apkpure
+    auto_update: true
