@@ -42,8 +42,8 @@ This installs:
 ## Step 5: Verify Installation
 
 ```bash
-phone-master --version
-phone-master --help
+phonemaster --version
+phonemaster --help
 ```
 
 ## Step 6: Verify ADB Installation

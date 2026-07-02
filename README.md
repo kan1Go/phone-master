@@ -45,40 +45,40 @@ pip install -e .
 
 ### 1. Check Device Connection
 ```bash
-phone-master devices
+phonemaster devices
 ```
 
 ### 2. List Installed Apps
 ```bash
-phone-master list-apps
-phone-master list-apps --source chinese_store
+phonemaster list-apps
+phonemaster list-apps --source chinese_store
 ```
 
 ### 3. Search for Apps
 ```bash
-phone-master search --query "小宇宙"
-phone-master search --query "Douyin" --store apkpure
+phonemaster search --query "小宇宙"
+phonemaster search --query "Douyin" --store apkpure
 ```
 
 ### 4. Check for Updates
 ```bash
-phone-master check-updates
+phonemaster check-updates
 ```
 
 ### 5. Install an App
 ```bash
-phone-master install com.qiwu.app /path/to/app.apk
-phone-master install com.qiwu.app /path/to/app.apk --reinstall
+phonemaster install com.qiwu.app /path/to/app.apk
+phonemaster install com.qiwu.app /path/to/app.apk --reinstall
 ```
 
 ### 6. Uninstall an App
 ```bash
-phone-master uninstall com.qiwu.app
+phonemaster uninstall com.qiwu.app
 ```
 
 ### 7. View Configuration
 ```bash
-phone-master config-show
+phonemaster config-show
 ```
 
 ## Configuration
@@ -173,7 +173,7 @@ mypy phone_master/
 
 ### APK installation fails
 - Ensure you have the correct APK for your device architecture (ARM, ARM64, etc.)
-- Try: `phone-master install <package> <apk> --reinstall`
+- Try: `phonemaster install <package> <apk> --reinstall`
 
 ### Connection issues with app stores
 - Check your internet connection

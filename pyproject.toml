@@ -23,6 +23,7 @@ dependencies = [
     "tabulate>=0.9.0",
     "lxml>=4.9.0",
     "beautifulsoup4>=4.11.0",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-phone-master = "phone_master.cli:main"
+phonemaster = "phone_master.cli:main"
 
 [tool.setuptools]
 packages = ["phone_master"]

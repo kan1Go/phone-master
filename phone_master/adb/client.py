@@ -29,31 +29,32 @@ class ADBClient:
         self.adb_path = adb_path
         self.device_serial = device_serial
     
-    def _run_command(self, *args: str) -> str:
+    def _run_command(self, *args: str, timeout: int = 30) -> str:
         """Run ADB command and return output.
-        
+
         Args:
             *args: Command arguments to pass to ADB
-            
+            timeout: Seconds to wait before giving up
+
         Returns:
             Command output string
-            
+
         Raises:
             RuntimeError: If command fails
         """
         cmd = [self.adb_path]
-        
+
         if self.device_serial:
             cmd.extend(["-s", self.device_serial])
-        
+
         cmd.extend(args)
-        
+
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=timeout
             )
             
             if result.returncode != 0:
@@ -79,16 +80,46 @@ class ADBClient:
         
         return devices
     
-    def get_installed_packages(self) -> List[str]:
-        """Get list of installed packages."""
-        output = self._run_command("shell", "pm", "list", "packages")
+    def get_installed_packages(self, third_party_only: bool = True) -> List[str]:
+        """Get list of installed packages.
+
+        Args:
+            third_party_only: Exclude preinstalled system packages (adb "-3" flag)
+        """
+        args = ["shell", "pm", "list", "packages"]
+        if third_party_only:
+            args.append("-3")
+        output = self._run_command(*args)
         packages = []
-        
+
         for line in output.split("\n"):
             if line.startswith("package:"):
                 packages.append(line.replace("package:", "").strip())
-        
+
         return packages
+
+    def get_package_installers(self, third_party_only: bool = True) -> Dict[str, Optional[str]]:
+        """Get installer package name for each installed package.
+
+        Args:
+            third_party_only: Exclude preinstalled system packages (adb "-3" flag)
+
+        Returns:
+            Dict mapping package_name -> installer package name (None if sideloaded)
+        """
+        args = ["shell", "pm", "list", "packages", "-i"]
+        if third_party_only:
+            args.append("-3")
+        output = self._run_command(*args)
+        installers: Dict[str, Optional[str]] = {}
+
+        for line in output.split("\n"):
+            match = re.match(r"package:(\S+)\s+installer=(\S+)", line.strip())
+            if match:
+                package_name, installer = match.groups()
+                installers[package_name] = None if installer == "null" else installer
+
+        return installers
     
     def get_package_info(self, package_name: str) -> Dict[str, Any]:
         """Get package information including version."""
@@ -129,8 +160,8 @@ class ADBClient:
         if reinstall:
             args.append("-r")
         args.append(apk_path)
-        
-        output = self._run_command("shell", *args)
+
+        output = self._run_command(*args, timeout=300)
         return "Success" in output
     
     def uninstall_app(self, package_name: str) -> bool:

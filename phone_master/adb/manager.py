@@ -31,26 +31,33 @@ class ADBManager:
             pass
         return None
     
-    def get_installed_apps(self) -> List[App]:
-        """Get list of installed apps with details."""
+    def get_installed_apps(self, third_party_only: bool = True) -> List[App]:
+        """Get list of installed apps with details.
+
+        Args:
+            third_party_only: Exclude preinstalled system packages
+        """
         apps = []
-        packages = self.client.get_installed_packages()
-        
+        packages = self.client.get_installed_packages(third_party_only)
+        installers = self.client.get_package_installers(third_party_only)
+
         for package_name in packages:
             try:
                 info = self.client.get_package_info(package_name)
+                installer = installers.get(package_name)
+                source = AppSource.GOOGLE_PLAY if installer == "com.android.vending" else AppSource.SIDELOAD
                 app = App(
                     package_name=package_name,
                     app_name=package_name,  # Can be improved with package manager
                     version=info.get("version", "unknown"),
                     version_code=info.get("version_code", 0),
-                    source=AppSource.UNKNOWN,
+                    source=source,
                     installed=True
                 )
                 apps.append(app)
             except Exception as e:
                 print(f"Error getting info for {package_name}: {e}")
-        
+
         return apps
     
     def install_apk(self, apk_path: str, package_name: str = "", reinstall: bool = False) -> bool:

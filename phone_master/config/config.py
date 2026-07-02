@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import yaml
 from pydantic_settings import BaseSettings
 
@@ -35,31 +35,38 @@ class Config(BaseSettings):
         "xmind": "https://store.xmind.com",
     }
     
-    # Apps to manage - specific to your needs
-    managed_apps: List[Dict[str, any]] = [
+    # Apps to manage - specific to your needs.
+    # download_page: the app's Uptodown page, used by `phonemaster update` to
+    # resolve a real download link via a headless browser. Leave unset if the
+    # app has no known automatable source (checked manually instead).
+    managed_apps: List[Dict[str, Any]] = [
         {
-            "package_name": "com.qiwu.app",
+            "package_name": "app.podcast.cosmos",
             "app_name": "小宇宙",
-            "sources": ["apkpure", "chinese_store"],
+            "sources": ["chinese_store"],
             "auto_update": True,
+            "download_page": None,
         },
         {
-            "package_name": "com.volcengine.live",
+            "package_name": "com.larus.nova",
             "app_name": "豆包",
-            "sources": ["google_play", "apkpure"],
+            "sources": ["uptodown"],
             "auto_update": True,
+            "download_page": "https://doubao.en.uptodown.com/android",
         },
         {
             "package_name": "com.ss.android.ugc.aweme",
             "app_name": "抖音（国内版）",
-            "sources": ["chinese_store"],
+            "sources": ["uptodown"],
             "auto_update": True,
+            "download_page": "https://douyin.en.uptodown.com/android",
         },
         {
-            "package_name": "com.gotokeep.app",
+            "package_name": "com.gotokeep.keep",
             "app_name": "Keep健身国内版",
-            "sources": ["chinese_store", "apkpure"],
+            "sources": ["uptodown"],
             "auto_update": True,
+            "download_page": "https://keep.en.uptodown.com/android",
         },
     ]
     
