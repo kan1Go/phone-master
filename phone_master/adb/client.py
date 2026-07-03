@@ -2,6 +2,7 @@
 
 import subprocess
 import re
+import posixpath
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
@@ -168,7 +169,51 @@ class ADBClient:
         """Uninstall app from device."""
         output = self._run_command("uninstall", package_name)
         return "Success" in output
-    
+
+    def install_from_device_path(self, device_path: str, reinstall: bool = False) -> bool:
+        """Install an APK that's already sitting on the device's own storage.
+
+        Uses `pm install` (device-side) rather than `adb install` (which pushes
+        a host file first) - the file never needs to leave the device. Files
+        under another app's scoped-storage directory (e.g. Android/data/<pkg>)
+        aren't directly readable by pm install: it runs as system_server, whose
+        SELinux policy denies reading that fuse context even though `adb shell`
+        itself can. So this stages a copy under /data/local/tmp first, which is
+        exactly what pm install's own error message suggests doing.
+        """
+        staged_path = f"/data/local/tmp/{posixpath.basename(device_path)}"
+        try:
+            self._run_command("shell", "cp", device_path, staged_path, timeout=120)
+
+            args = ["shell", "pm", "install"]
+            if reinstall:
+                args.append("-r")
+            args.append(staged_path)
+
+            output = self._run_command(*args, timeout=300)
+            return "Success" in output
+        finally:
+            try:
+                self._run_command("shell", "rm", "-f", staged_path)
+            except RuntimeError:
+                pass
+
+    def find_files(self, directory: str, name_pattern: str = "*.apk") -> List[str]:
+        """Find files matching a name pattern under a directory on the device."""
+        try:
+            output = self._run_command("shell", "find", directory, "-iname", name_pattern, timeout=30)
+        except RuntimeError:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def remove_file(self, device_path: str) -> bool:
+        """Delete a file on the device."""
+        try:
+            self._run_command("shell", "rm", "-f", device_path)
+            return True
+        except RuntimeError:
+            return False
+
     def push_file(self, local_path: str, device_path: str) -> bool:
         """Push file to device."""
         try:

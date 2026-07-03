@@ -25,6 +25,7 @@ dependencies = [
     "lxml>=4.9.0",
     "beautifulsoup4>=4.11.0",
     "playwright>=1.40",
+    "androguard>=4.0",
 ]
 
 [project.optional-dependencies]
