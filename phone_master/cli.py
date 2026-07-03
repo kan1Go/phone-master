@@ -92,6 +92,44 @@ def _download_with_progress(url: str, dest_path: Path) -> None:
                 bar.update(len(chunk))
 
 
+def _download_many_with_progress(jobs: list) -> None:
+    """Download multiple (url, dest_path) pairs concurrently with one aggregate progress bar.
+
+    Downloads are network-bound and independent, so there's no reason to make
+    the user wait for one to finish before starting the next (unlike adb
+    installs, which stay sequential since they all go through the same device).
+    """
+    if not jobs:
+        return
+    if len(jobs) == 1:
+        _download_with_progress(*jobs[0])
+        return
+
+    responses = []
+    total = 0
+    for url, dest_path in jobs:
+        r = requests.get(url, stream=True, timeout=30)
+        r.raise_for_status()
+        total += int(r.headers.get("content-length", 0))
+        responses.append((r, dest_path))
+
+    lock = threading.Lock()
+    with click.progressbar(length=total, label=f"Downloading {len(jobs)} apps") as bar:
+
+        def worker(response, dest_path):
+            with response, open(dest_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    f.write(chunk)
+                    with lock:
+                        bar.update(len(chunk))
+
+        threads = [threading.Thread(target=worker, args=(r, dest_path)) for r, dest_path in responses]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+
 @click.group()
 @click.version_option()
 @click.pass_context
@@ -436,15 +474,21 @@ def check_updates(ctx):
 
         Path(config.download_dir).mkdir(parents=True, exist_ok=True)
 
+        # Downloads are independent network transfers, so fetch them all at once
+        # rather than making the user wait for each one before starting the next.
+        for c in chosen:
+            c["dest_path"] = Path(config.download_dir) / f"{c['app_config']['package_name']}-{c['latest_version']}.apk"
+
+        click.echo(f"\n{Fore.CYAN}Updating: {', '.join(c['app_config']['app_name'] for c in chosen)}{Style.RESET_ALL}")
+        _download_many_with_progress([(c["download_url"], c["dest_path"]) for c in chosen])
+
+        # Installs all go through the same adb-connected device, so those stay sequential.
         for c in chosen:
             app_config = c["app_config"]
             package_name = app_config["package_name"]
             click.echo(f"\n{Fore.CYAN}{app_config['app_name']}: {c['current_version']} → {c['latest_version']}{Style.RESET_ALL}")
 
-            dest_path = Path(config.download_dir) / f"{package_name}-{c['latest_version']}.apk"
-            _download_with_progress(c["download_url"], dest_path)
-
-            success = _run_with_spinner("Installing on device", adb.install_apk, str(dest_path), package_name, True)
+            success = _run_with_spinner("Installing on device", adb.install_apk, str(c["dest_path"]), package_name, True)
             if success:
                 click.echo(f"{Fore.GREEN}✓ {app_config['app_name']} updated to {c['latest_version']}{Style.RESET_ALL}")
             else:
