@@ -133,6 +133,21 @@ def _download_many_with_progress(jobs: list) -> None:
             t.join()
 
 
+def _get_installed_apps_with_progress(adb, third_party_only, label="Reading installed apps"):
+    """adb.get_installed_apps runs one `dumpsys` call per package - slow and
+    silent otherwise, so this drives a determinate progress bar over it."""
+    total = len(adb.client.get_installed_packages(third_party_only))
+    with click.progressbar(length=total, label=label) as bar:
+        return adb.get_installed_apps(third_party_only, on_progress=lambda: bar.update(1))
+
+
+def _resolve_names_with_progress(resolver, package_names, label="Resolving app names"):
+    """resolver.resolve_many hits the network once per uncached package - can
+    be slow on a cold cache, so this drives a determinate progress bar over it."""
+    with click.progressbar(length=len(package_names), label=label) as bar:
+        return resolver.resolve_many(package_names, on_progress=lambda: bar.update(1))
+
+
 def _scan_and_clean_local_apks(adb, config, package_names):
     """Find stray .apk files for the given packages already sitting on the device.
 
@@ -222,8 +237,7 @@ def list_apps(ctx, source, all_apps):
             click.echo(f"{Fore.RED}✗ No device connected{Style.RESET_ALL}")
             return
 
-        click.echo(f"{Fore.CYAN}Fetching installed apps...{Style.RESET_ALL}")
-        apps = adb.get_installed_apps(third_party_only=not all_apps)
+        apps = _get_installed_apps_with_progress(adb, not all_apps)
 
         # Chrome WebAPKs are auto-generated wrappers around "Add to Home Screen"
         # websites, not real installable apps - noise for this tool's purposes.
@@ -242,7 +256,7 @@ def list_apps(ctx, source, all_apps):
 
         known_names = {a['package_name']: a['app_name'] for a in config.managed_apps}
         resolver = AppNameResolver(config.cache_dir, known_names)
-        names = resolver.resolve_many([app.package_name for app in apps])
+        names = _resolve_names_with_progress(resolver, [app.package_name for app in apps])
 
         # Prepare table data - flag apps Google Play can't manage (sideloaded)
         table_data = [
@@ -399,7 +413,7 @@ def update(ctx, package_name):
             click.echo(f"{Fore.RED}✗ No device connected{Style.RESET_ALL}")
             return
 
-        installed_apps = adb.get_installed_apps(third_party_only=False)
+        installed_apps = _get_installed_apps_with_progress(adb, False)
         current = next((a for a in installed_apps if a.package_name == package_name), None)
         current_version = current.version if current else "not installed"
         click.echo(f"{Fore.CYAN}{app_config['app_name']} ({package_name}): installed version {current_version}{Style.RESET_ALL}")
@@ -466,7 +480,7 @@ def check_updates(ctx):
             click.echo(f"{Fore.RED}✗ No device connected{Style.RESET_ALL}")
             return
 
-        installed_apps = adb.get_installed_apps(third_party_only=False)
+        installed_apps = _get_installed_apps_with_progress(adb, False)
         installed_by_pkg = {a.package_name: a for a in installed_apps}
         all_packages = [a['package_name'] for a in config.managed_apps]
 
@@ -648,7 +662,7 @@ def find_apks(ctx):
             click.echo("No APK files found.")
             return
 
-        installed_apps = adb.get_installed_apps(third_party_only=False)
+        installed_apps = _get_installed_apps_with_progress(adb, False)
         installed_by_pkg = {a.package_name: a for a in installed_apps}
 
         Path(config.cache_dir).mkdir(parents=True, exist_ok=True)

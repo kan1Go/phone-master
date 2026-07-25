@@ -1,7 +1,7 @@
 """ADB Manager for app management."""
 
 import os
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any
 from ..models import App, AppSource, AppStatus
 from .client import ADBClient
 
@@ -31,11 +31,16 @@ class ADBManager:
             pass
         return None
     
-    def get_installed_apps(self, third_party_only: bool = True) -> List[App]:
+    def get_installed_apps(
+        self, third_party_only: bool = True, on_progress: Optional[Callable[[], None]] = None
+    ) -> List[App]:
         """Get list of installed apps with details.
 
         Args:
             third_party_only: Exclude preinstalled system packages
+            on_progress: Called once after each package is inspected (one
+                `dumpsys` call per package makes this the slow part of the
+                call, so callers use it to drive a progress bar)
         """
         apps = []
         packages = self.client.get_installed_packages(third_party_only)
@@ -57,6 +62,9 @@ class ADBManager:
                 apps.append(app)
             except Exception as e:
                 print(f"Error getting info for {package_name}: {e}")
+            finally:
+                if on_progress:
+                    on_progress()
 
         return apps
     

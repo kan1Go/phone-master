@@ -11,7 +11,7 @@ import html
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -46,14 +46,24 @@ class AppNameResolver:
             json.dumps(self._cache, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-    def resolve_many(self, package_names: List[str]) -> Dict[str, str]:
-        """Get display names for a list of packages, only hitting the network for unseen ones."""
+    def resolve_many(
+        self, package_names: List[str], on_progress: Optional[Callable[[], None]] = None
+    ) -> Dict[str, str]:
+        """Get display names for a list of packages, only hitting the network for unseen ones.
+
+        Args:
+            on_progress: Called once per package. The network lookup (one
+                Play Store request per uncached package) is the slow part,
+                so callers use this to drive a progress bar.
+        """
         result = {}
         changed = False
 
         for package_name in package_names:
             if package_name in self._cache:
                 result[package_name] = self._cache[package_name]
+                if on_progress:
+                    on_progress()
                 continue
 
             name = (
@@ -64,6 +74,8 @@ class AppNameResolver:
             self._cache[package_name] = name
             result[package_name] = name
             changed = True
+            if on_progress:
+                on_progress()
 
         if changed:
             self._save_cache()
