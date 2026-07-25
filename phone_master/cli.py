@@ -12,7 +12,7 @@ from colorama import Fore, Style
 from wcwidth import wcswidth, wcwidth as _wcwidth
 from .adb import ADBManager
 from .adb.app_names import AppNameResolver
-from .adb.apk_finder import find_candidate_paths, inspect_apk
+from .adb.apk_finder import find_candidate_paths, inspect_apk, read_package_name
 from .app_stores import AppStoreManager
 from .app_stores.tencent_myapp import TencentMyAppStore
 from .app_stores.uptodown import UptodownStore
@@ -321,20 +321,20 @@ def search(ctx, query, store):
 
 
 @main.command()
-@click.argument('package_name')
 @click.argument('apk_path', type=click.Path(exists=True))
 @click.option('--reinstall', '-r', is_flag=True, help='Force reinstall')
 @click.pass_context
-def install(ctx, package_name, apk_path, reinstall):
+def install(ctx, apk_path, reinstall):
     """Install APK on device."""
     try:
         config = ctx.obj['config']
         adb = ADBManager(config.adb_path, config.device_serial)
-        
+
         if not adb.check_device_connection():
             click.echo(f"{Fore.RED}✗ No device connected{Style.RESET_ALL}")
             return
-        
+
+        package_name = read_package_name(apk_path) or Path(apk_path).name
         click.echo(f"{Fore.CYAN}Installing {package_name}...{Style.RESET_ALL}")
         
         if adb.install_apk(apk_path, package_name, reinstall):
