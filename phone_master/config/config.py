@@ -68,6 +68,13 @@ class Config(BaseSettings):
             "auto_update": True,
             "download_page": "https://keep.en.uptodown.com/android",
         },
+        {
+            "package_name": "com.tencent.qqmusic",
+            "app_name": "QQ音乐",
+            "sources": ["uptodown"],
+            "auto_update": True,
+            "download_page": "https://qqmusic.en.uptodown.com/android",
+        },
     ]
     
     # Download configuration
