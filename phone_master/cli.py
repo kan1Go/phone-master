@@ -2,6 +2,7 @@
 
 import threading
 import time
+import posixpath
 from pathlib import Path
 
 import click
@@ -185,6 +186,89 @@ def _scan_and_clean_local_apks(adb, config, package_names):
             best_by_pkg[info["package_name"]] = info
 
     return best_by_pkg
+
+
+def _dictionary_directories(source_dir: str):
+    """Return visible dictionary directories in stable display order."""
+    source = Path(source_dir).expanduser()
+    if not source.is_dir():
+        raise click.ClickException(f"Dictionary source directory does not exist: {source}")
+    return sorted(
+        (path for path in source.iterdir() if path.is_dir() and not path.name.startswith(".")),
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def _local_size(path: Path) -> int:
+    """Return the combined size of all files below path."""
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _color_progress(iterable=None, length=None, label="Working"):
+    """Create the shared high-contrast progress bar used by dictionary commands."""
+    return click.progressbar(
+        iterable=iterable,
+        length=length,
+        label=f"{Fore.CYAN}{label}{Style.RESET_ALL}",
+        color=True,
+        bar_template=(
+            "%(label)s  " + Fore.MAGENTA + "[%(bar)s]" + Fore.YELLOW
+            + " %(info)s" + Style.RESET_ALL
+        ),
+    )
+
+
+def _push_dictionary_with_progress(adb, dictionary: Path, phone_root: str) -> bool:
+    """Push one dictionary while tracking bytes appearing at its destination."""
+    total = max(_local_size(dictionary), 1)
+    remote_path = posixpath.join(phone_root, dictionary.name)
+    state = {"success": False, "error": None}
+
+    def push():
+        try:
+            state["success"] = adb.client.push_file(str(dictionary), f"{phone_root.rstrip('/')}/")
+        except Exception as exc:
+            state["error"] = exc
+
+    worker = threading.Thread(target=push)
+    worker.start()
+    shown = 0
+    with _color_progress(length=total, label=f"Pushing {dictionary.name}") as bar:
+        while worker.is_alive():
+            current = min(adb.client.directory_size(remote_path), total)
+            if current > shown:
+                bar.update(current - shown)
+                shown = current
+            time.sleep(0.4)
+        worker.join()
+        if state["success"] and shown < total:
+            bar.update(total - shown)
+    if state["error"]:
+        raise state["error"]
+    return state["success"]
+
+
+def _select_items(items, selection: str):
+    """Resolve an all/none/comma-separated numbered selection."""
+    value = selection.strip().lower()
+    if value == "all":
+        return items
+    if value in {"", "none"}:
+        return []
+
+    try:
+        numbers = [int(part.strip()) for part in value.split(",") if part.strip()]
+    except ValueError as exc:
+        raise click.BadParameter("use comma-separated numbers, 'all', or 'none'") from exc
+
+    invalid = [number for number in numbers if not 1 <= number <= len(items)]
+    if invalid:
+        raise click.BadParameter(
+            f"selection out of range: {', '.join(str(number) for number in invalid)}"
+        )
+    # Preserve display order and avoid copying duplicates.
+    selected = set(numbers)
+    return [item for index, item in enumerate(items, start=1) if index in selected]
 
 
 @click.group()
@@ -731,6 +815,123 @@ def find_apks(ctx):
         click.echo(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
 
 
+def _list_local_dictionaries(config):
+    with _color_progress(length=1, label="Scanning Mac dictionaries") as bar:
+        dictionaries = _dictionary_directories(config.dictionary_source_dir)
+        bar.update(1)
+    return dictionaries
+
+
+def _connected_adb(config):
+    adb = ADBManager(config.adb_path, config.device_serial)
+    if not adb.check_device_connection():
+        raise click.ClickException(
+            "No authorized device connected. Unlock the phone and accept its USB-debugging prompt."
+        )
+    return adb
+
+
+def _show_dictionaries(config, location):
+    if location == "mac":
+        dictionaries = _list_local_dictionaries(config)
+        names = [dictionary.name for dictionary in dictionaries]
+        display_path = config.dictionary_source_dir
+    else:
+        adb = _connected_adb(config)
+        with _color_progress(length=1, label="Scanning phone dictionaries") as bar:
+            adb.client.create_directory(config.dictionary_phone_dir)
+            paths = adb.client.list_directories(config.dictionary_phone_dir)
+            bar.update(1)
+        names = sorted((posixpath.basename(path) for path in paths), key=str.casefold)
+        display_path = config.dictionary_phone_dir
+
+    click.echo(f"{Fore.CYAN}Dictionaries on {location} ({display_path}):{Style.RESET_ALL}")
+    if not names:
+        click.echo("  None found.")
+    for index, name in enumerate(names, start=1):
+        click.echo(f"  {index}. {name}")
+    return names
+
+
+def _push_dictionaries(config, selection):
+    try:
+        dictionaries = _list_local_dictionaries(config)
+        if not dictionaries:
+            click.echo(f"No dictionaries found in {config.dictionary_source_dir}")
+            return
+
+        click.echo(f"{Fore.CYAN}Dictionaries on mac ({config.dictionary_source_dir}):{Style.RESET_ALL}")
+        for index, dictionary in enumerate(dictionaries, start=1):
+            click.echo(f"  {index}. {dictionary.name}")
+
+        chosen = _select_items(dictionaries, selection)
+        if not chosen:
+            click.echo("Nothing selected.")
+            return
+
+        adb = _connected_adb(config)
+        adb.client.create_directory(config.dictionary_phone_dir)
+        failures = []
+        for dictionary in chosen:
+            click.echo(f"\n{Fore.CYAN}Copying {dictionary.name}...{Style.RESET_ALL}")
+            success = _push_dictionary_with_progress(adb, dictionary, config.dictionary_phone_dir)
+            if success:
+                click.echo(f"{Fore.GREEN}✓ Copied {dictionary.name}{Style.RESET_ALL}")
+            else:
+                failures.append(dictionary.name)
+                click.echo(f"{Fore.RED}✗ Failed to copy {dictionary.name}{Style.RESET_ALL}")
+
+        if failures:
+            raise click.ClickException(f"Failed dictionaries: {', '.join(failures)}")
+        click.echo(
+            f"\n{Fore.GREEN}✓ Copied {len(chosen)} dictionary/directories to "
+            f"{config.dictionary_phone_dir}{Style.RESET_ALL}"
+        )
+
+    except click.ClickException:
+        raise
+    except (click.Abort, EOFError):
+        click.echo("\nNo selection made, aborting.")
+    except click.BadParameter:
+        raise
+    except Exception as e:
+        raise click.ClickException(str(e)) from e
+
+
+@main.group(name="dict")
+def dictionary_commands():
+    """List and copy dictionaries between the Mac and phone."""
+
+
+@dictionary_commands.command(name="list")
+@click.argument("location", type=click.Choice(["mac", "phone"]), default="mac", required=False)
+@click.pass_context
+def dict_list(ctx, location):
+    """List dictionaries on the Mac (default) or phone."""
+    _show_dictionaries(ctx.obj["config"], location)
+
+
+@dictionary_commands.command(name="push")
+@click.argument("selection")
+@click.pass_context
+def dict_push(ctx, selection):
+    """Push a dictionary number, comma-separated numbers, or all to the phone."""
+    _push_dictionaries(ctx.obj["config"], selection)
+
+
+@main.command(name="copy-dictionaries", hidden=True)
+@click.option("--select", "selection")
+@click.pass_context
+def copy_dictionaries(ctx, selection):
+    """Compatibility alias for `phonemaster dict push`."""
+    if selection is None:
+        selection = click.prompt(
+            "Select dictionaries to copy (comma-separated numbers, 'all', or 'none')",
+            default="none",
+        )
+    _push_dictionaries(ctx.obj["config"], selection)
+
+
 @main.command()
 @click.pass_context
 def config_show(ctx):
@@ -742,6 +943,8 @@ def config_show(ctx):
         click.echo(f"  Device Serial: {config.device_serial or 'auto-detect'}")
         click.echo(f"  Auto-update: {config.auto_update}")
         click.echo(f"  Download Directory: {config.download_dir}")
+        click.echo(f"  Dictionary Source Directory: {config.dictionary_source_dir}")
+        click.echo(f"  Dictionary Phone Directory: {config.dictionary_phone_dir}")
         click.echo(f"\n{Fore.CYAN}Managed Apps:{Style.RESET_ALL}")
         for app in config.managed_apps:
             click.echo(f"  - {app['app_name']} ({app['package_name']})")

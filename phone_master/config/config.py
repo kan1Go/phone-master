@@ -80,6 +80,10 @@ class Config(BaseSettings):
     # Download configuration
     download_dir: str = "./downloads"
     cache_dir: str = "./cache"
+
+    # Dictionary synchronization
+    dictionary_source_dir: str = "/Users/kangyil/Documents/Dictionaries"
+    dictionary_phone_dir: str = "/storage/emulated/0/Documents/Dictionary"
     
     class Config:
         env_file = ".env"

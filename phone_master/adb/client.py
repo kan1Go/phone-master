@@ -215,12 +215,31 @@ class ADBClient:
             return False
 
     def push_file(self, local_path: str, device_path: str) -> bool:
-        """Push file to device."""
+        """Push a file or directory to the device."""
         try:
-            self._run_command("push", local_path, device_path)
+            self._run_command("push", local_path, device_path, timeout=3600)
             return True
         except RuntimeError:
             return False
+
+    def create_directory(self, device_path: str) -> None:
+        """Create a directory (and missing parents) on the device."""
+        self._run_command("shell", "mkdir", "-p", device_path)
+
+    def list_directories(self, device_path: str) -> List[str]:
+        """List immediate child directories at a device path."""
+        output = self._run_command(
+            "shell", "find", device_path, "-mindepth", "1", "-maxdepth", "1", "-type", "d"
+        )
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def directory_size(self, device_path: str) -> int:
+        """Return the apparent size of a device directory in bytes."""
+        try:
+            output = self._run_command("shell", "du", "-sk", device_path)
+            return int(output.split()[0]) * 1024
+        except (RuntimeError, ValueError, IndexError):
+            return 0
     
     def pull_file(self, device_path: str, local_path: str) -> bool:
         """Pull file from device."""

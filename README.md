@@ -81,6 +81,23 @@ phonemaster uninstall com.qiwu.app
 phonemaster config-show
 ```
 
+### 8. Copy Dictionaries to the Phone
+
+List the dictionary folders and select which ones to copy:
+
+```bash
+phonemaster dict list
+phonemaster dict list phone
+```
+
+For non-interactive use, pass a numbered selection or copy all dictionaries:
+
+```bash
+phonemaster dict push 1
+phonemaster dict push 1,2
+phonemaster dict push all
+```
+
 ## Configuration
 
 Create a `.phone-master.yaml` file in your project root to customize behavior:
@@ -92,6 +109,8 @@ auto_update: false
 check_updates_interval: 3600
 download_dir: ./downloads
 cache_dir: ./cache
+dictionary_source_dir: /Users/kangyil/Documents/Dictionaries
+dictionary_phone_dir: /storage/emulated/0/Documents/Dictionary
 
 managed_apps:
   - package_name: com.qiwu.app
