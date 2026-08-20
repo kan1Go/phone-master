@@ -45,10 +45,11 @@ class ADBManager:
         apps = []
         packages = self.client.get_installed_packages(third_party_only)
         installers = self.client.get_package_installers(third_party_only)
+        package_infos = self.client.get_package_infos()
 
         for package_name in packages:
             try:
-                info = self.client.get_package_info(package_name)
+                info = package_infos.get(package_name, {})
                 installer = installers.get(package_name)
                 source = AppSource.GOOGLE_PLAY if installer == "com.android.vending" else AppSource.SIDELOAD
                 app = App(

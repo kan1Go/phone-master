@@ -3,6 +3,7 @@
 import subprocess
 import re
 import posixpath
+import shlex
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
@@ -130,6 +131,28 @@ class ADBClient:
             return info
         except RuntimeError:
             return {}
+
+    def get_package_infos(self) -> Dict[str, Dict[str, Any]]:
+        """Get version details for every package with one adb round trip."""
+        output = self._run_command("shell", "dumpsys", "package", "packages", timeout=120)
+        infos: Dict[str, Dict[str, Any]] = {}
+        package_name = None
+        for line in output.splitlines():
+            match = re.match(r"  Package \[([^]]+)\]", line)
+            if match:
+                package_name = match.group(1)
+                infos[package_name] = {}
+                continue
+            if package_name is None:
+                continue
+            stripped = line.strip()
+            if stripped.startswith("versionCode="):
+                match = re.match(r"versionCode=(\d+)", stripped)
+                if match:
+                    infos[package_name]["version_code"] = int(match.group(1))
+            elif stripped.startswith("versionName="):
+                infos[package_name]["version"] = stripped.partition("=")[2]
+        return infos
     
     def _parse_dumpsys_output(self, output: str) -> Dict[str, Any]:
         """Parse dumpsys package output."""
@@ -206,6 +229,17 @@ class ADBClient:
             return []
         return [line.strip() for line in output.splitlines() if line.strip()]
 
+    def find_files_many(self, directories: List[str], name_pattern: str = "*.apk") -> List[str]:
+        """Search multiple device directories in one adb shell invocation."""
+        if not directories:
+            return []
+        commands = [
+            f"find {shlex.quote(directory)} -type f -iname {shlex.quote(name_pattern)} 2>/dev/null"
+            for directory in directories
+        ]
+        output = self._run_command("shell", " ; ".join(commands), timeout=60)
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
     def remove_file(self, device_path: str) -> bool:
         """Delete a file on the device."""
         try:
@@ -213,6 +247,13 @@ class ADBClient:
             return True
         except RuntimeError:
             return False
+
+    def file_signature(self, device_path: str) -> Optional[str]:
+        """Return a cheap size/mtime signature for cache invalidation."""
+        try:
+            return self._run_command("shell", "stat", "-c", "%s:%Y", device_path)
+        except RuntimeError:
+            return None
 
     def push_file(self, local_path: str, device_path: str) -> bool:
         """Push a file or directory to the device."""

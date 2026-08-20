@@ -52,6 +52,26 @@ class UptodownStore:
                 browser.close()
         return results
 
+    def get_version_batch(self, app_page_urls: List[str]) -> Dict[str, Optional[str]]:
+        """Read listing versions without resolving heavyweight download links."""
+        results = {}
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                for url in app_page_urls:
+                    page = browser.new_page()
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                        version_el = page.query_selector(".version")
+                        results[url] = version_el.inner_text().strip() if version_el else None
+                    except Exception as e:
+                        results[url] = e
+                    finally:
+                        page.close()
+            finally:
+                browser.close()
+        return results
+
     def _get_latest_on_browser(self, browser, app_page_url: str) -> Tuple[Optional[str], str]:
         page = browser.new_page()
         try:

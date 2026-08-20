@@ -48,54 +48,56 @@ pip install -e .
 phonemaster devices
 ```
 
-### 2. List Installed Apps
+### 2. Scan for Updates
 ```bash
-phonemaster list-apps
-phonemaster list-apps --source chinese_store
+phonemaster scan
 ```
 
-### 3. Search for Apps
+To list managed apps installed outside Google Play, or every installed
+third-party app:
+
 ```bash
-phonemaster search --query "小宇宙"
-phonemaster search --query "Douyin" --store apkpure
+phonemaster apps
+phonemaster apps --all
 ```
 
-### 4. Check for Updates
+Phone Master first checks APKs already downloaded on the phone (including
+应用宝). When no local update exists, it checks the configured online source and
+downloads a newer APK automatically. The scan prints everything ready to install.
+
+### 3. Install Prepared Updates
 ```bash
-phonemaster check-updates
+phonemaster update
 ```
 
-### 5. Install an App
-```bash
-phonemaster install com.qiwu.app /path/to/app.apk
-phonemaster install com.qiwu.app /path/to/app.apk --reinstall
-```
+This installs every update prepared by the most recent scan. There are no
+selection prompts or network lookups during installation.
 
-### 6. Uninstall an App
+### 4. Uninstall an App
 ```bash
 phonemaster uninstall com.qiwu.app
 ```
 
-### 7. View Configuration
+### 5. View Configuration
 ```bash
-phonemaster config-show
+phonemaster configs
 ```
 
-### 8. Copy Dictionaries to the Phone
+### 6. Copy Dictionaries to the Phone
 
 List the dictionary folders and select which ones to copy:
 
 ```bash
-phonemaster dict list
-phonemaster dict list phone
+phonemaster dictionaries list
+phonemaster dictionaries list phone
 ```
 
 For non-interactive use, pass a numbered selection or copy all dictionaries:
 
 ```bash
-phonemaster dict push 1
-phonemaster dict push 1,2
-phonemaster dict push all
+phonemaster dictionaries push 1
+phonemaster dictionaries push 1,2
+phonemaster dictionaries push all
 ```
 
 ## Configuration
@@ -192,7 +194,7 @@ mypy phone_master/
 
 ### APK installation fails
 - Ensure you have the correct APK for your device architecture (ARM, ARM64, etc.)
-- Try: `phonemaster install <package> <apk> --reinstall`
+- Run `phonemaster scan` again to replace a missing or incomplete download
 
 ### Connection issues with app stores
 - Check your internet connection
