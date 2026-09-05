@@ -234,7 +234,7 @@ class ADBClient:
         if not directories:
             return []
         commands = [
-            f"find {shlex.quote(directory)} -type f -iname {shlex.quote(name_pattern)} 2>/dev/null"
+            f"find {shlex.quote(directory)} -type f -iname {shlex.quote(name_pattern)} 2>/dev/null || true"
             for directory in directories
         ]
         output = self._run_command("shell", " ; ".join(commands), timeout=60)

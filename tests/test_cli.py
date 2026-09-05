@@ -1,12 +1,14 @@
 """Tests for phone-master CLI."""
 
 import pytest
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
 from click.testing import CliRunner
 from phone_master.cli import _scan_and_clean_local_apks, main
 from phone_master.models import AppSource
+from phone_master.config import Config
 
 
 @pytest.fixture
@@ -100,6 +102,54 @@ def test_apps_all_shows_all_third_party_apps(cli_runner):
     assert "other.side" in result.output
 
 
+@pytest.mark.parametrize("local_update", [True, False])
+def test_myapp_is_managed_and_scan_prepares_update(cli_runner, tmp_path, local_update):
+    config = Config(
+        cache_dir=str(tmp_path / "cache"),
+        download_dir=str(tmp_path / "downloads"),
+    )
+    package = "com.tencent.android.qqdownloader"
+    installed = [SimpleNamespace(package_name=package, version="1.0.0", source=AppSource.SIDELOAD)]
+    device_path = f"/sdcard/Android/data/{package}/files/update.apk"
+    local = {package: {"device_path": device_path, "version_name": "2.0.0"}} if local_update else {}
+
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._get_installed_apps_with_progress", return_value=installed),
+        patch("phone_master.cli._resolve_names_with_progress", return_value={package: "应用宝"}),
+        patch("phone_master.cli._scan_and_clean_local_apks", return_value=local) as scan_local,
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+        patch("phone_master.cli.UptodownStore") as store_type,
+        patch("phone_master.cli._download_many_with_progress") as download,
+    ):
+        adb_type.return_value.check_device_connection.return_value = True
+        adb_type.return_value.device_serial = "test-device"
+        page = "https://tencent-app-store.en.uptodown.com/android"
+        store_type.return_value.get_version_batch.return_value = {page: "2.0.0"}
+        store_type.return_value.get_latest_batch.return_value = {page: ("2.0.0", "https://example.com/myapp.apk")}
+
+        apps_result = cli_runner.invoke(main, ["apps"])
+        assert apps_result.exit_code == 0
+        assert "应用宝" in apps_result.output
+
+        result = cli_runner.invoke(main, ["scan"])
+
+    assert result.exit_code == 0, result.output
+    assert package in scan_local.call_args.args[2]
+    plan = json.loads((tmp_path / "cache" / "update-plan.json").read_text())
+    update = next(item for item in plan["updates"] if item["package_name"] == package)
+    assert update["new_version"] == "2.0.0"
+    if local_update:
+        assert update["device_path"] == device_path
+        assert page not in store_type.return_value.get_version_batch.call_args.args[0]
+    else:
+        assert page in store_type.return_value.get_version_batch.call_args.args[0]
+        assert download.call_args.args[0] == [
+            ("https://example.com/myapp.apk", tmp_path / "downloads" / f"{package}-2.0.0.apk")
+        ]
+
+
 def test_dictionaries_command_replaces_dict(cli_runner):
     result = cli_runner.invoke(main, ["--help"])
     command_names = {
@@ -109,6 +159,63 @@ def test_dictionaries_command_replaces_dict(cli_runner):
     }
     assert "dictionaries" in command_names
     assert "dict" not in command_names
+
+
+@pytest.mark.parametrize("serial, expected", [("oneplus", {"other.play", "other.side"}), ("reader", {"configured.app"})])
+def test_device_scoped_app_management(cli_runner, tmp_path, serial, expected):
+    config = Config(
+        cache_dir=str(tmp_path / "cache"), download_dir=str(tmp_path / "downloads"),
+        manage_all_apps_devices=["oneplus"],
+        managed_apps=[{"package_name": "configured.app", "app_name": "Configured"}],
+    )
+    installed = [
+        SimpleNamespace(package_name="other.play", app_name="Play App", version="1", source=AppSource.GOOGLE_PLAY),
+        SimpleNamespace(package_name="other.side", app_name="Side App", version="1", source=AppSource.SIDELOAD),
+    ]
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._get_installed_apps_with_progress", return_value=installed) as get_apps,
+        patch("phone_master.cli._resolve_names_with_progress", return_value={a.package_name: a.app_name for a in installed}),
+        patch("phone_master.cli._scan_and_clean_local_apks") as local_scan,
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb_type.return_value.device_serial = serial
+        adb_type.return_value.check_device_connection.return_value = True
+        local_scan.side_effect = lambda adb, config, packages, installed: {
+            p: {"device_path": f"/sdcard/Download/{p}.apk", "version_name": "2"} for p in packages
+        }
+        listed = cli_runner.invoke(main, ["apps"])
+        assert listed.exit_code == 0
+        assert ("Play App" in listed.output) == (serial == "oneplus")
+        result = cli_runner.invoke(main, ["scan"])
+        assert result.exit_code == 0, result.output
+        assert get_apps.call_args.args[1] == (serial == "oneplus")
+        assert set(local_scan.call_args.args[2]) == expected
+
+    plan = json.loads((tmp_path / "cache" / "update-plan.json").read_text())
+    assert {item["package_name"] for item in plan["updates"]} == expected
+
+
+def test_all_apps_update_skips_system_packages(cli_runner, tmp_path):
+    config = Config(cache_dir=str(tmp_path), download_dir=str(tmp_path), manage_all_apps_devices=["oneplus"])
+    (tmp_path / "update-plan.json").write_text(json.dumps({
+        "device_serial": "oneplus",
+        "updates": [{"package_name": p, "app_name": p, "current_version": "1", "new_version": "2",
+                     "device_path": f"/sdcard/Download/{p}.apk"} for p in ["system.app", "user.app"]],
+    }))
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb = adb_type.return_value
+        adb.device_serial = "oneplus"
+        adb.client.get_installed_packages.return_value = ["user.app"]
+        result = cli_runner.invoke(main, ["update"])
+    assert result.exit_code == 0, result.output
+    adb.client.get_installed_packages.assert_called_once_with(True)
+    adb.client.install_from_device_path.assert_called_once_with("/sdcard/Download/user.app.apk", True)
 
 
 def test_update_workflow_has_only_scan_and_update_commands(cli_runner):

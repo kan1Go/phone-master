@@ -24,6 +24,8 @@ class Config(BaseSettings):
     # ADB configuration
     adb_path: str = "adb"
     device_serial: Optional[str] = None
+    # These devices manage every installed non-system app, including Play apps.
+    manage_all_apps_devices: List[str] = []
     
     # App store configuration
     check_updates_interval: int = 3600  # seconds
@@ -40,6 +42,13 @@ class Config(BaseSettings):
     # resolve a real download link via a headless browser. Leave unset if the
     # app has no known automatable source (checked manually instead).
     managed_apps: List[Dict[str, Any]] = [
+        {
+            "package_name": "com.tencent.android.qqdownloader",
+            "app_name": "应用宝",
+            "sources": ["uptodown"],
+            "auto_update": True,
+            "download_page": "https://tencent-app-store.en.uptodown.com/android",
+        },
         {
             "package_name": "app.podcast.cosmos",
             "app_name": "小宇宙",

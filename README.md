@@ -7,6 +7,7 @@ A powerful command-line tool for managing Android apps on your phone, with speci
 - **ADB Integration**: Connect to Android devices via USB or network
 - **Multiple App Sources**: Google Play Store, APKPure, and Chinese app stores
 - **Chinese App Support**: Built-in support for popular Chinese apps:
+  - 应用宝 (Tencent App Store)
   - 小宇宙 (Xiaoyuzhou)
   - 豆包 (Doubao)
   - 抖音国内版 (Douyin - China version)
@@ -73,6 +74,20 @@ phonemaster update
 This installs every update prepared by the most recent scan. There are no
 selection prompts or network lookups during installation.
 
+To manage every installed non-system app on a specific phone (including Google
+Play apps), set its serial in `.phone-master.yaml`:
+
+```yaml
+device_serial: YOUR_PHONE_SERIAL
+manage_all_apps_devices: [YOUR_PHONE_SERIAL]
+```
+
+On these devices, `apps` lists all non-system apps and `scan` searches for newer
+APKs in Downloads, 应用宝's download folders, and each installed app's data folder.
+Known online sources remain available for configured apps. Apps without an online
+source can be updated when their APK is on the phone. Run `update` to install the
+prepared updates. Other devices keep the configured managed-app list.
+
 ### 4. Uninstall an App
 ```bash
 phonemaster uninstall com.qiwu.app
@@ -115,6 +130,11 @@ dictionary_source_dir: /Users/kangyil/Documents/Dictionaries
 dictionary_phone_dir: /storage/emulated/0/Documents/Dictionary
 
 managed_apps:
+  - package_name: com.tencent.android.qqdownloader
+    app_name: 应用宝
+    sources: [uptodown]
+    auto_update: true
+    download_page: https://tencent-app-store.en.uptodown.com/android
   - package_name: com.qiwu.app
     app_name: 小宇宙
     sources: [apkpure, chinese_store]
@@ -207,6 +227,7 @@ The tool specifically supports finding and updating:
 
 | App | Package Name | Preferred Sources |
 |-----|--------------|-------------------|
+| 应用宝 | com.tencent.android.qqdownloader | Uptodown |
 | 小宇宙 | com.qiwu.app | APKPure, Chinese Stores |
 | 豆包 | com.volcengine.live | Google Play, APKPure |
 | 抖音国内版 | com.ss.android.ugc.aweme | Chinese Stores |

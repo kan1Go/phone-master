@@ -33,6 +33,11 @@ MYAPP_DEVICE_ROOT = "/sdcard/Android/data/com.tencent.android.qqdownloader/"
 UPDATE_PLAN_FILE = "update-plan.json"
 
 
+def _manages_all_apps(config, adb):
+    devices = getattr(config, "manage_all_apps_devices", [])
+    return isinstance(devices, list) and adb.device_serial in devices
+
+
 def _google_color(index: int) -> str:
     r, g, b = GOOGLE_COLORS[index % len(GOOGLE_COLORS)]
     return f"\033[38;2;{r};{g};{b}m"
@@ -340,9 +345,11 @@ def apps(ctx, show_all):
 
         # Chrome WebAPKs are auto-generated wrappers around "Add to Home Screen"
         # websites, not real installable apps - noise for this tool's purposes.
-        apps = [app for app in apps if not app.package_name.startswith("org.chromium.webapk.")]
+        manage_all = _manages_all_apps(config, adb)
+        if not manage_all:
+            apps = [app for app in apps if not app.package_name.startswith("org.chromium.webapk.")]
 
-        if not show_all:
+        if not show_all and not manage_all:
             managed_packages = {item['package_name'] for item in config.managed_apps}
             apps = [
                 app for app in apps
@@ -460,9 +467,20 @@ def scan(ctx):
     if not adb.check_device_connection():
         raise click.ClickException("No device connected")
 
-    installed_apps = _get_installed_apps_with_progress(adb, False)
+    manage_all = _manages_all_apps(config, adb)
+    installed_apps = _get_installed_apps_with_progress(adb, manage_all)
     installed_by_pkg = {app.package_name: app for app in installed_apps}
-    package_names = [app["package_name"] for app in config.managed_apps]
+    managed_apps = config.managed_apps
+    if manage_all:
+        configured = {app["package_name"]: app for app in config.managed_apps}
+        managed_apps = [
+            configured.get(app.package_name, {
+                "package_name": app.package_name,
+                "app_name": app.app_name,
+            })
+            for app in installed_apps
+        ]
+    package_names = [app["package_name"] for app in managed_apps]
     local_best = _run_with_spinner(
         "Scanning APKs on the phone",
         _scan_and_clean_local_apks,
@@ -474,7 +492,7 @@ def scan(ctx):
 
     candidates = []
     remote_apps = []
-    for app_config in config.managed_apps:
+    for app_config in managed_apps:
         package_name = app_config["package_name"]
         current = installed_by_pkg.get(package_name)
         current_version = current.version if current else "not installed"
@@ -544,7 +562,7 @@ def scan(ctx):
 
     _save_update_plan(config, adb.device_serial, candidates)
     if not candidates:
-        click.echo(f"{Fore.GREEN}All managed apps are up to date.{Style.RESET_ALL}")
+        click.echo(f"{Fore.GREEN}No newer APKs found for managed apps.{Style.RESET_ALL}")
         return
 
     click.echo("\n" + tabulate(
@@ -580,7 +598,14 @@ def update(ctx):
         )
 
     failed = []
+    allowed_packages = (
+        set(adb.client.get_installed_packages(True))
+        if _manages_all_apps(config, adb) else None
+    )
     for item in candidates:
+        if allowed_packages is not None and item["package_name"] not in allowed_packages:
+            click.echo(f"Skipping {item['package_name']}: not an installed non-system app")
+            continue
         click.echo(
             f"\n{Fore.CYAN}{item['app_name']}: {item['current_version']} → {item['new_version']}{Style.RESET_ALL}"
         )

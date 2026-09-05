@@ -3,6 +3,7 @@
 # ADB configuration
 adb_path: adb
 device_serial: null  # Set to device serial number if needed, or null for auto-detect
+manage_all_apps_devices: []  # Device serials that manage all installed non-system apps
 
 # Update checking
 check_updates_interval: 3600  # seconds
@@ -20,6 +21,12 @@ chinese_stores:
 
 # Apps to manage - Add or remove as needed
 managed_apps:
+  - package_name: com.tencent.android.qqdownloader
+    app_name: 应用宝
+    sources: [uptodown]
+    auto_update: true
+    download_page: https://tencent-app-store.en.uptodown.com/android
+
   - package_name: com.qiwu.app
     app_name: 小宇宙
     sources:
