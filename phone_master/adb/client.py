@@ -60,7 +60,10 @@ class ADBClient:
             )
             
             if result.returncode != 0:
-                raise RuntimeError(f"ADB command failed: {result.stderr}")
+                details = "\n".join(
+                    part.strip() for part in (result.stdout, result.stderr) if part.strip()
+                ) or f"exit code {result.returncode} (no output)"
+                raise RuntimeError(f"ADB command failed: {details}")
             
             return result.stdout.strip()
         except subprocess.TimeoutExpired as e:
@@ -214,7 +217,9 @@ class ADBClient:
             args.append(staged_path)
 
             output = self._run_command(*args, timeout=300)
-            return "Success" in output
+            if "Success" not in output:
+                raise RuntimeError(f"APK installation failed: {output or 'no output'}")
+            return True
         finally:
             try:
                 self._run_command("shell", "rm", "-f", staged_path)

@@ -58,3 +58,26 @@ def test_get_installed_apps_uses_one_bulk_package_query():
     assert [app.version for app in apps] == ["1.0", "2.0"]
     bulk.assert_called_once_with()
     individual.assert_not_called()
+
+
+@pytest.mark.parametrize("stdout, stderr, expected", [
+    ("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]", "", "INSTALL_FAILED_UPDATE_INCOMPATIBLE"),
+    ("", "device offline", "device offline"),
+    ("", "", "exit code 1 (no output)"),
+    ("install failure", "extra detail", "install failure\nextra detail"),
+])
+def test_adb_failure_includes_both_output_streams(stdout, stderr, expected):
+    from subprocess import CompletedProcess
+    with patch("phone_master.adb.client.subprocess.run",
+               return_value=CompletedProcess([], 1, stdout, stderr)):
+        with pytest.raises(RuntimeError) as error:
+            ADBClient()._run_command("shell", "pm", "install", "/tmp/app.apk")
+    assert expected in str(error.value)
+
+
+def test_device_install_failure_cleans_staging_and_reports_reason():
+    client = ADBClient()
+    with patch.object(client, "_run_command", side_effect=["", "Failure [INSTALL_FAILED_INVALID_APK]", ""]) as run:
+        with pytest.raises(RuntimeError, match="INSTALL_FAILED_INVALID_APK"):
+            client.install_from_device_path("/sdcard/Download/app.apk", True)
+    assert run.call_args.args == ("shell", "rm", "-f", "/data/local/tmp/app.apk")

@@ -62,9 +62,26 @@ phonemaster apps
 phonemaster apps --all
 ```
 
-Phone Master first checks APKs already downloaded on the phone (including
-应用宝). When no local update exists, it checks the configured online source and
-downloads a newer APK automatically. The scan prints everything ready to install.
+Phone Master checks APKs already downloaded on the phone (including 应用宝).
+Scans use only local phone APKs: no online version checks, browser preparation,
+or downloads. Apps without a newer local APK are skipped. The scan prints
+everything ready to install.
+
+Local APKs for 下厨房, 小红书, and 淘宝 are also included on every phone,
+even if the app is not installed yet. Recognition uses exact APK package names;
+add other Chinese apps with the `chinese_apps` mapping in `.phone-master.yaml`.
+Providing this mapping replaces the default three entries:
+
+```yaml
+chinese_apps:
+  com.xiachufang: 下厨房
+  com.xingin.xhs: 小红书
+  com.taobao.taobao: 淘宝
+```
+
+`update` deletes each phone APK after a successful installation. Failed installs
+keep their APK and remain in the update plan for retry. Scans continue to remove
+outdated and duplicate APKs for eligible apps.
 
 ### 3. Install Prepared Updates
 ```bash
@@ -84,8 +101,7 @@ manage_all_apps_devices: [YOUR_PHONE_SERIAL]
 
 On these devices, `apps` lists all non-system apps and `scan` searches for newer
 APKs in Downloads, 应用宝's download folders, and each installed app's data folder.
-Known online sources remain available for configured apps. Apps without an online
-source can be updated when their APK is on the phone. Run `update` to install the
+Apps can be updated when a newer APK is on the phone. Run `update` to install the
 prepared updates. Other devices keep the configured managed-app list.
 
 ### 4. Uninstall an App

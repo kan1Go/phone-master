@@ -27,6 +27,13 @@ class Config(BaseSettings):
     # These devices manage every installed non-system app, including Play apps.
     manage_all_apps_devices: List[str] = []
     
+    # Additional Chinese apps eligible for APK installation on any device.
+    chinese_apps: Dict[str, str] = {
+        "com.xiachufang": "下厨房",
+        "com.xingin.xhs": "小红书",
+        "com.taobao.taobao": "淘宝",
+    }
+
     # App store configuration
     check_updates_interval: int = 3600  # seconds
     auto_update: bool = False

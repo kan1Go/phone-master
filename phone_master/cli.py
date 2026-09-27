@@ -461,7 +461,7 @@ def _load_update_plan(config):
 @main.command()
 @click.pass_context
 def scan(ctx):
-    """Find and prepare the newest APKs for all managed apps."""
+    """Find and prepare newer APKs already on the phone."""
     config = ctx.obj["config"]
     adb = ADBManager(config.adb_path, config.device_serial)
     if not adb.check_device_connection():
@@ -480,6 +480,15 @@ def scan(ctx):
             })
             for app in installed_apps
         ]
+    # Include recognized Chinese apps even when absent from this device or its
+    # managed-app list. These additional entries only use APKs on the phone.
+    managed_apps = list(managed_apps)
+    selected = {app["package_name"] for app in managed_apps}
+    local_only = set()
+    for package, name in config.chinese_apps.items():
+        if package not in selected:
+            managed_apps.append({"package_name": package, "app_name": name})
+            local_only.add(package)
     package_names = [app["package_name"] for app in managed_apps]
     local_best = _run_with_spinner(
         "Scanning APKs on the phone",
@@ -491,7 +500,6 @@ def scan(ctx):
     )
 
     candidates = []
-    remote_apps = []
     for app_config in managed_apps:
         package_name = app_config["package_name"]
         current = installed_by_pkg.get(package_name)
@@ -508,57 +516,10 @@ def scan(ctx):
                     "device_path": local["device_path"],
                 }
             )
-        elif app_config.get("download_page"):
-            remote_apps.append((app_config, current_version))
-        else:
+        elif package_name not in local_only:
             click.echo(
-                f"{Fore.YELLOW}⚠ {app_config['app_name']}: no APK on phone and no online source configured{Style.RESET_ALL}"
+                f"{Fore.YELLOW}Skipped {app_config['app_name']}: no newer APK on phone{Style.RESET_ALL}"
             )
-
-    if remote_apps:
-        store = UptodownStore()
-        pages = [app["download_page"] for app, _ in remote_apps]
-        versions = _run_with_spinner(
-            f"Checking {len(pages)} app(s) online", store.get_version_batch, pages
-        )
-        remote_candidates = []
-        for (app_config, current_version), page in zip(remote_apps, pages):
-            result = versions.get(page)
-            if isinstance(result, Exception):
-                click.echo(f"{Fore.RED}✗ {app_config['app_name']}: {result}{Style.RESET_ALL}")
-            elif result and is_newer(result, current_version):
-                remote_candidates.append((app_config, current_version, result))
-
-        if remote_candidates:
-            candidate_pages = [app["download_page"] for app, _, _ in remote_candidates]
-            resolved = _run_with_spinner(
-                f"Preparing {len(candidate_pages)} online update(s)",
-                store.get_latest_batch,
-                candidate_pages,
-            )
-            downloads = []
-            prepared = []
-            Path(config.download_dir).mkdir(parents=True, exist_ok=True)
-            for app_config, current_version, version in remote_candidates:
-                result = resolved.get(app_config["download_page"])
-                if isinstance(result, Exception) or not result:
-                    click.echo(f"{Fore.RED}✗ {app_config['app_name']}: could not prepare download{Style.RESET_ALL}")
-                    continue
-                _, download_url = result
-                local_path = Path(config.download_dir) / f"{app_config['package_name']}-{version}.apk"
-                downloads.append((download_url, local_path))
-                prepared.append(
-                    {
-                        "package_name": app_config["package_name"],
-                        "app_name": app_config["app_name"],
-                        "current_version": current_version,
-                        "new_version": version,
-                        "source": "online",
-                        "local_path": str(local_path.resolve()),
-                    }
-                )
-            _download_many_with_progress(downloads)
-            candidates.extend(prepared)
 
     _save_update_plan(config, adb.device_serial, candidates)
     if not candidates:
@@ -603,32 +564,39 @@ def update(ctx):
         if _manages_all_apps(config, adb) else None
     )
     for item in candidates:
-        if allowed_packages is not None and item["package_name"] not in allowed_packages:
+        if (allowed_packages is not None
+                and item["package_name"] not in allowed_packages
+                and not ("device_path" in item and item["package_name"] in config.chinese_apps)):
             click.echo(f"Skipping {item['package_name']}: not an installed non-system app")
             continue
         click.echo(
             f"\n{Fore.CYAN}{item['app_name']}: {item['current_version']} → {item['new_version']}{Style.RESET_ALL}"
         )
-        if "device_path" in item:
-            success = _run_with_spinner(
-                "Installing from phone",
-                adb.client.install_from_device_path,
-                item["device_path"],
-                True,
-            )
-        else:
-            local_path = item.get("local_path", "")
-            if not Path(local_path).is_file():
-                click.echo(f"{Fore.RED}✗ Download is missing; run `phonemaster scan` again{Style.RESET_ALL}")
-                failed.append(item)
-                continue
-            success = _run_with_spinner(
-                "Installing",
-                adb.install_apk,
-                local_path,
-                item["package_name"],
-                True,
-            )
+        try:
+            if "device_path" in item:
+                success = _run_with_spinner(
+                    "Installing from phone",
+                    adb.client.install_from_device_path,
+                    item["device_path"],
+                    True,
+                )
+            else:
+                local_path = item.get("local_path", "")
+                if not Path(local_path).is_file():
+                    click.echo(f"{Fore.RED}✗ Download is missing; run `phonemaster scan` again{Style.RESET_ALL}")
+                    failed.append(item)
+                    continue
+                success = _run_with_spinner(
+                    "Installing",
+                    adb.install_apk,
+                    local_path,
+                    item["package_name"],
+                    True,
+                )
+        except (RuntimeError, OSError) as exc:
+            click.echo(f"{Fore.RED}✗ {item['app_name']}: {exc}{Style.RESET_ALL}")
+            failed.append(item)
+            continue
         if success:
             if "device_path" in item:
                 removed = adb.client.remove_file(item["device_path"])

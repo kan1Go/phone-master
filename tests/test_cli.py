@@ -138,16 +138,16 @@ def test_myapp_is_managed_and_scan_prepares_update(cli_runner, tmp_path, local_u
     assert result.exit_code == 0, result.output
     assert package in scan_local.call_args.args[2]
     plan = json.loads((tmp_path / "cache" / "update-plan.json").read_text())
-    update = next(item for item in plan["updates"] if item["package_name"] == package)
-    assert update["new_version"] == "2.0.0"
+    store_type.assert_not_called()
+    download.assert_not_called()
+    assert "online" not in result.output
     if local_update:
+        update = next(item for item in plan["updates"] if item["package_name"] == package)
+        assert update["new_version"] == "2.0.0"
         assert update["device_path"] == device_path
-        assert page not in store_type.return_value.get_version_batch.call_args.args[0]
     else:
-        assert page in store_type.return_value.get_version_batch.call_args.args[0]
-        assert download.call_args.args[0] == [
-            ("https://example.com/myapp.apk", tmp_path / "downloads" / f"{package}-2.0.0.apk")
-        ]
+        assert plan["updates"] == []
+        assert "no newer APK on phone" in result.output
 
 
 def test_dictionaries_command_replaces_dict(cli_runner):
@@ -165,7 +165,7 @@ def test_dictionaries_command_replaces_dict(cli_runner):
 def test_device_scoped_app_management(cli_runner, tmp_path, serial, expected):
     config = Config(
         cache_dir=str(tmp_path / "cache"), download_dir=str(tmp_path / "downloads"),
-        manage_all_apps_devices=["oneplus"],
+        manage_all_apps_devices=["oneplus"], chinese_apps={},
         managed_apps=[{"package_name": "configured.app", "app_name": "Configured"}],
     )
     installed = [
@@ -291,3 +291,71 @@ def test_dict_push_rejects_invalid_selection(cli_runner, tmp_path):
 
     assert result.exit_code != 0
     assert "selection out of range: 2" in result.output
+
+
+@pytest.mark.parametrize("manage_all", [False, True])
+@pytest.mark.parametrize("success", [False, True])
+def test_chinese_apks_scan_install_and_cleanup(cli_runner, tmp_path, manage_all, success):
+    config = Config(cache_dir=str(tmp_path), download_dir=str(tmp_path),
+                    managed_apps=[], manage_all_apps_devices=["phone"] if manage_all else [])
+    details = {
+        f"/sdcard/Download/{package}.apk": {
+            "device_path": f"/sdcard/Download/{package}.apk",
+            "package_name": package, "version_name": "2",
+        }
+        for package in [*config.chinese_apps, "unrelated.app"]
+    }
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._get_installed_apps_with_progress", return_value=[]),
+        patch("phone_master.cli.find_candidate_paths", return_value=list(details)),
+        patch("phone_master.cli.inspect_apk", side_effect=lambda client, path, cache: details[path]),
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb = adb_type.return_value
+        adb.device_serial = "phone"
+        adb.client.get_installed_packages.return_value = []
+        adb.client.install_from_device_path.return_value = success
+        scanned = cli_runner.invoke(main, ["scan"])
+        assert scanned.exit_code == 0, scanned.output
+        plan = json.loads((tmp_path / "update-plan.json").read_text())
+        assert {item["package_name"] for item in plan["updates"]} == set(config.chinese_apps)
+        adb.client.remove_file.assert_not_called()
+        updated = cli_runner.invoke(main, ["update"])
+        assert updated.exit_code == (0 if success else 1), updated.output
+        assert adb.client.install_from_device_path.call_count == 3
+        deleted = {call.args[0] for call in adb.client.remove_file.call_args_list}
+        expected = {f"/sdcard/Download/{package}.apk" for package in config.chinese_apps}
+        assert deleted == (expected if success else set())
+        remaining = json.loads((tmp_path / "update-plan.json").read_text())["updates"]
+        assert len(remaining) == (0 if success else 3)
+
+
+def test_update_continues_after_adb_exception_and_retains_failed_apk(cli_runner, tmp_path):
+    config = Config(cache_dir=str(tmp_path), download_dir=str(tmp_path))
+    candidates = [
+        {"package_name": p, "app_name": p, "current_version": "1", "new_version": "2",
+         "device_path": f"/sdcard/Download/{p}.apk"}
+        for p in ["com.xingin.xhs", "com.taobao.taobao"]
+    ]
+    plan_path = tmp_path / "update-plan.json"
+    plan_path.write_text(json.dumps({"device_serial": "phone", "updates": candidates}))
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb = adb_type.return_value
+        adb.device_serial = "phone"
+        adb.client.install_from_device_path.side_effect = [
+            RuntimeError("ADB command failed: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"), True,
+        ]
+        result = cli_runner.invoke(main, ["update"])
+    assert result.exit_code == 1
+    assert "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in result.output
+    assert "1 update(s) failed" in result.output
+    assert "Traceback" not in result.output
+    assert adb.client.install_from_device_path.call_count == 2
+    adb.client.remove_file.assert_called_once_with(candidates[1]["device_path"])
+    assert json.loads(plan_path.read_text())["updates"] == candidates[:1]
