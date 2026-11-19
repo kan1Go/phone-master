@@ -22,6 +22,7 @@ def test_inspect_apk_reuses_metadata_when_device_file_is_unchanged(tmp_path):
     with patch("phone_master.adb.apk_finder.APK") as apk_type:
         apk_type.return_value.get_package.return_value = "example.app"
         apk_type.return_value.get_androidversion_name.return_value = "2.0"
+        apk_type.return_value.get_androidversion_code.return_value = "20"
         first = inspect_apk(client, "/device/update.apk", str(tmp_path))
         second = inspect_apk(client, "/device/update.apk", str(tmp_path))
 

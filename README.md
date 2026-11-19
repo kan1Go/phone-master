@@ -55,6 +55,25 @@ phonemaster devices select
 phonemaster devices select 2
 ```
 
+### Update and clean up in one command
+
+```bash
+phonemaster update --all
+# Short form:
+phonemaster update -a
+```
+
+Scans APK files in accessible shared phone storage (including SD cards), updates
+only apps already installed on the phone, and deletes APKs after successful
+installation. APKs with the same or an older Android version code are deleted
+immediately; only the newest candidate per app is kept for installation.
+APKs for apps that are not installed, unreadable APKs, and APKs without usable
+version codes are left alone. Android storage permissions still apply.
+
+APKs rejected with `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (signature mismatch)
+are also deleted. Other failed installations keep their APK for retry.
+No separate scan or configured managed-app list is needed for this mode.
+
 ### 2. Scan for Updates
 ```bash
 phonemaster scan

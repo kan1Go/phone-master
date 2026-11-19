@@ -74,7 +74,7 @@ def inspect_apk(client, device_path: str, tmp_dir: str) -> Optional[Dict]:
     if signature and metadata_path.exists():
         try:
             cached = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if cached.get("signature") == signature:
+            if cached.get("signature") == signature and "version_code" in cached.get("info", {}):
                 return cached["info"]
         except (OSError, ValueError, KeyError):
             pass
@@ -88,6 +88,7 @@ def inspect_apk(client, device_path: str, tmp_dir: str) -> Optional[Dict]:
             "device_path": device_path,
             "package_name": apk.get_package(),
             "version_name": apk.get_androidversion_name(),
+            "version_code": int(apk.get_androidversion_code() or 0),
         }
         if signature:
             metadata_path.write_text(

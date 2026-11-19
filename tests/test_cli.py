@@ -625,13 +625,65 @@ def test_update_continues_after_adb_exception_and_retains_failed_apk(cli_runner,
         adb = adb_type.return_value
         adb.device_serial = "phone"
         adb.client.install_from_device_path.side_effect = [
-            RuntimeError("ADB command failed: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]"), True,
+            RuntimeError("ADB command failed: Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"), True,
         ]
         result = cli_runner.invoke(main, ["update"])
     assert result.exit_code == 1
-    assert "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in result.output
+    assert "INSTALL_FAILED_INSUFFICIENT_STORAGE" in result.output
     assert "1 update(s) failed" in result.output
     assert "Traceback" not in result.output
     assert adb.client.install_from_device_path.call_count == 2
     adb.client.remove_file.assert_called_once_with(candidates[1]["device_path"])
     assert json.loads(plan_path.read_text())["updates"] == candidates[:1]
+
+
+@pytest.mark.parametrize("flag", ["--all", "-a"])
+def test_update_all_scans_installed_apps_and_cleans_apks(cli_runner, tmp_path, flag):
+    config = Config(cache_dir=str(tmp_path), download_dir=str(tmp_path))
+    paths = ["/sdcard/old.apk", "/sdcard/new.apk", "/sdcard/latest.apk",
+             "/sdcard/absent.apk", "/sdcard/invalid.apk"]
+    details = {
+        path: {"package_name": "absent.app" if "absent" in path else "installed.app",
+               "version_name": "arbitrary-name", "version_code": code, "device_path": path}
+        for path, code in zip(paths, [10, 20, 30, 40, 0])
+    }
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli.inspect_apk", side_effect=lambda client, path, cache: details[path]),
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb = adb_type.return_value
+        adb.device_serial = "phone"
+        adb.get_installed_apps.return_value = [SimpleNamespace(
+            package_name="installed.app", app_name="Installed", version="1", version_code=10)]
+        adb.client.get_installed_packages.return_value = ["installed.app"]
+        adb.client.find_files_many.return_value = paths + ["/storage/emulated/0/latest.apk"]
+        result = cli_runner.invoke(main, ["update", flag])
+    assert result.exit_code == 0, result.output
+    assert adb.get_installed_apps.call_args.args == (False,)
+    adb.client.install_from_device_path.assert_called_once_with("/sdcard/latest.apk", True)
+    assert {c.args[0] for c in adb.client.remove_file.call_args_list} == set(paths[:3])
+
+
+@pytest.mark.parametrize("removed", [True, False])
+def test_update_removes_signature_mismatch_apk(cli_runner, tmp_path, removed):
+    config = Config(cache_dir=str(tmp_path), download_dir=str(tmp_path))
+    item = {"package_name": "example.app", "app_name": "Example", "current_version": "1",
+            "new_version": "2", "device_path": "/sdcard/update.apk"}
+    plan = tmp_path / "update-plan.json"
+    plan.write_text(json.dumps({"device_serial": "phone", "updates": [item]}))
+    with (
+        patch("phone_master.cli.Config.from_file", return_value=config),
+        patch("phone_master.cli.ADBManager") as adb_type,
+        patch("phone_master.cli._run_with_spinner", side_effect=lambda label, func, *args: func(*args)),
+    ):
+        adb = adb_type.return_value
+        adb.device_serial = "phone"
+        adb.client.install_from_device_path.side_effect = RuntimeError(
+            "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]")
+        adb.client.remove_file.return_value = removed
+        result = cli_runner.invoke(main, ["update"])
+    assert result.exit_code == (0 if removed else 1), result.output
+    adb.client.remove_file.assert_called_once_with(item["device_path"])
+    assert json.loads(plan.read_text())["updates"] == ([] if removed else [item])

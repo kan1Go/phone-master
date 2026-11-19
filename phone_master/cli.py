@@ -159,6 +159,54 @@ def _resolve_names_with_progress(resolver, package_names, label="Resolving app n
         return resolver.resolve_many(package_names, on_progress=lambda: bar.update(1))
 
 
+def _scan_all_installed_apks(adb, config):
+    """Inspect accessible shared storage, keeping updates for installed apps only."""
+    installed = {
+        app.package_name: app
+        for app in _get_installed_apps_with_progress(adb, False)
+    }
+    best = {}
+    paths = dict.fromkeys(
+        path.replace("/storage/emulated/0/", "/sdcard/", 1)
+            .replace("/storage/self/primary/", "/sdcard/", 1)
+        for path in adb.client.find_files_many(["/sdcard", "/storage"], "*.apk")
+    )
+    for path in paths:
+        info = inspect_apk(adb.client, path, config.cache_dir)
+        if not info or info["package_name"] not in installed:
+            continue
+        current = installed[info["package_name"]]
+        code = info.get("version_code", 0)
+        current_code = current.version_code
+        if not code or not current_code:
+            click.echo(f"Skipping {path}: version code unavailable")
+            continue
+        if code <= current_code:
+            if adb.client.remove_file(path):
+                click.echo(f"Removed outdated APK: {path}")
+            else:
+                click.echo(f"Could not remove APK: {path}")
+            continue
+        previous = best.get(info["package_name"])
+        if previous:
+            discarded = previous if code > previous["version_code"] else info
+            if adb.client.remove_file(discarded["device_path"]):
+                click.echo(f"Removed superseded APK: {discarded['device_path']}")
+            if discarded is info:
+                continue
+        best[info["package_name"]] = info
+    return [
+        {
+            "package_name": package,
+            "app_name": installed[package].app_name,
+            "current_version": installed[package].version,
+            "new_version": info["version_name"],
+            "device_path": info["device_path"],
+        }
+        for package, info in best.items()
+    ]
+
+
 def _scan_and_clean_local_apks(adb, config, package_names, installed_by_pkg=None):
     """Find stray .apk files for the given packages already sitting on the device.
 
@@ -769,19 +817,32 @@ def scan(ctx):
 
 
 @main.command()
+@click.option("--all", "-a", "all_apks", is_flag=True, help="Scan phone APKs, update installed apps, and clean up APKs.")
 @click.pass_context
-def update(ctx):
-    """Install every update prepared by the latest scan."""
+def update(ctx, all_apks):
+    """Install prepared updates, or scan and update installed apps with --all."""
     config = ctx.obj["config"]
-    plan = _load_update_plan(config)
-    candidates = plan.get("updates", [])
+    if all_apks:
+        adb = ADBManager(config.adb_path, config.device_serial)
+        if not adb.check_device_connection():
+            raise click.ClickException("No device connected")
+        candidates = _run_with_spinner(
+            "Scanning all phone APKs", _scan_all_installed_apks, adb, config
+        )
+        _save_update_plan(config, adb.device_serial, candidates)
+        plan = {"device_serial": adb.device_serial, "updates": candidates}
+    else:
+        plan = _load_update_plan(config)
+        candidates = plan.get("updates", [])
     if not candidates:
-        click.echo(f"{Fore.GREEN}No updates are waiting. Run `phonemaster scan` to check again.{Style.RESET_ALL}")
+        message = "No newer APKs found for installed apps." if all_apks else "No updates are waiting. Run `phonemaster scan` to check again."
+        click.echo(f"{Fore.GREEN}{message}{Style.RESET_ALL}")
         return
 
-    adb = ADBManager(config.adb_path, config.device_serial)
-    if not adb.check_device_connection():
-        raise click.ClickException("No device connected")
+    if not all_apks:
+        adb = ADBManager(config.adb_path, config.device_serial)
+        if not adb.check_device_connection():
+            raise click.ClickException("No device connected")
     if plan.get("device_serial") and plan["device_serial"] != adb.device_serial:
         raise click.ClickException(
             "This scan belongs to a different phone. Run `phonemaster scan` again."
@@ -790,7 +851,7 @@ def update(ctx):
     failed = []
     allowed_packages = (
         set(adb.client.get_installed_packages(True))
-        if _manages_all_apps(config, adb) else None
+        if _manages_all_apps(config, adb) and not all_apks else None
     )
     for item in candidates:
         if (allowed_packages is not None
@@ -824,6 +885,11 @@ def update(ctx):
                 )
         except (RuntimeError, OSError) as exc:
             click.echo(f"{Fore.RED}✗ {item['app_name']}: {exc}{Style.RESET_ALL}")
+            if "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in str(exc) and "device_path" in item:
+                if adb.client.remove_file(item["device_path"]):
+                    click.echo("Removed incompatible APK from phone")
+                    continue
+                click.echo(f"Could not remove incompatible APK: {item['device_path']}")
             failed.append(item)
             continue
         if success:
@@ -843,7 +909,7 @@ def update(ctx):
     _save_update_plan(config, adb.device_serial, failed)
     if failed:
         raise click.ClickException(f"{len(failed)} update(s) failed and remain in the update plan")
-    click.echo(f"\n{Fore.GREEN}All updates installed.{Style.RESET_ALL}")
+    click.echo(f"\n{Fore.GREEN}Update processing complete.{Style.RESET_ALL}")
 
 
 def _legacy_update(ctx, package_name):
