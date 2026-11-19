@@ -4,6 +4,7 @@ import threading
 import time
 import posixpath
 import json
+import re
 from pathlib import Path
 
 import click
@@ -13,6 +14,7 @@ from tabulate import tabulate
 from colorama import Fore, Style
 from wcwidth import wcswidth, wcwidth as _wcwidth
 from .adb import ADBManager
+from .adb.client import ADBClient, DeviceInfo
 from .adb.app_names import AppNameResolver
 from .adb.apk_finder import find_candidate_paths, inspect_apk
 from .app_stores.tencent_myapp import TencentMyAppStore
@@ -306,22 +308,249 @@ def main(ctx):
     ctx.obj['config'] = Config.from_file()
 
 
-@main.command(name="apps")
+@main.group(name="devices")
+def device_commands():
+    """Discover and select USB or Wi-Fi Android devices."""
+
+
+def _device_choices(client):
+    """Use one inventory for listing and selection, including non-ready devices."""
+    devices = list(client.get_devices())
+    services = client.get_wireless_services()
+    # ADB may expose the same phone by both IP and mDNS name after pairing.
+    for service in services:
+        matches = [d for d in devices if d.serial in _service_serials(service)]
+        if len(matches) > 1:
+            keep = next((d for d in matches if d.state == "device" and d.serial == service.address),
+                        next((d for d in matches if d.state == "device"), matches[0]))
+            devices = [d for d in devices if d not in matches or d is keep]
+    for service in services:
+        if any(d.serial in _service_serials(service) for d in devices):
+            continue
+        if service.service_type == "_adb-tls-pairing._tcp" and any(
+            s.service_type == "_adb-tls-connect._tcp" and s.name == service.name for s in services
+        ):
+            continue
+        state = "pairing" if service.service_type == "_adb-tls-pairing._tcp" else "discovered"
+        devices.append(DeviceInfo(service.address, state))
+    return devices, services
+
+
+def _service_serials(service):
+    return {service.address, service.name, f"{service.name}.{service.service_type}",
+            f"{service.name}.{service.service_type}."}
+
+
+def _related_services(serial, services):
+    matches = [s for s in services if serial in _service_serials(s)]
+    hosts = {s.address.rsplit(":", 1)[0] for s in matches}
+    if ":" in serial:
+        hosts.add(serial.rsplit(":", 1)[0])
+    return [s for s in services if s.address.rsplit(":", 1)[0] in hosts]
+
+
+def _ready_wireless_device(client, address, services):
+    aliases = {address}
+    for service in services:
+        if address in _service_serials(service):
+            aliases.update(_service_serials(service))
+    return next((d for d in client.get_devices(discover_wireless=False)
+                 if d.state == "device" and d.serial in aliases), None)
+
+
+def _select_connect_wireless(client, selected, services):
+    """Try connecting first, then guide pairing and verify the selected phone."""
+    if selected.state == "device":
+        return selected
+    if ":" not in selected.serial and "._tcp" not in selected.serial:
+        raise click.ClickException(
+            f"Cannot select {selected.serial}: {_device_status(selected)}. "
+            "Unlock the phone and accept its USB debugging prompt, then try again."
+        )
+    related = _related_services(selected.serial, services)
+    debug = next((s for s in related if s.service_type == "_adb-tls-connect._tcp"), None)
+    address = debug.address if debug else (None if selected.state == "pairing" else selected.serial)
+    if address:
+        click.echo(f"Connecting to {address}...")
+        try:
+            client.connect(address)
+        except RuntimeError as exc:
+            click.echo(f"Connection unsuccessful: {exc}")
+        ready = _ready_wireless_device(client, address, services)
+        if ready:
+            return ready
+    click.echo(
+        "\nThe phone is not connected. It may need pairing or a new debugging port.\n"
+        "On the phone, open Settings > Developer options > Wireless debugging >\n"
+        "Pair device with pairing code. Keep that screen open and enter its 6-digit code below.\n"
+        "The pairing port is different from the main Wireless debugging port.\n"
+        "Keep the phone and computer on the same Wi-Fi network; press Ctrl+C to cancel."
+    )
+    for attempt in range(3):
+        code = click.prompt("Wi-Fi pairing code", hide_input=True).strip()
+        if not re.fullmatch(r"[0-9]{6}", code):
+            click.echo("Enter exactly 6 digits from the phone's pairing screen.")
+            continue
+        # Discover after the user opens the pairing screen, not before the prompt.
+        services = client.get_wireless_services()
+        related = _related_services(selected.serial, services)
+        pairing = [s for s in related if s.service_type == "_adb-tls-pairing._tcp"]
+        if len(pairing) == 1:
+            pairing_address = pairing[0].address
+            click.echo(f"Found pairing address: {pairing_address}")
+        else:
+            pairing_address = click.prompt("IP:PORT shown in 'Pair device with pairing code'").strip()
+            selected_hosts = {s.address.rsplit(":", 1)[0] for s in related}
+            if ":" in selected.serial:
+                selected_hosts.add(selected.serial.rsplit(":", 1)[0])
+            if selected_hosts and pairing_address.rsplit(":", 1)[0] not in selected_hosts:
+                raise click.ClickException("Pairing address belongs to a different host. Select that device from a refreshed list.")
+        try:
+            client.pair(pairing_address, code)
+        except (RuntimeError, ValueError) as exc:
+            click.echo(f"Pairing unsuccessful: {exc}")
+            if attempt < 2:
+                click.echo("Reopen 'Pair device with pairing code' and enter the new code to retry.")
+            continue
+        click.echo("Paired successfully.")
+        services = client.get_wireless_services()
+        related = _related_services(pairing_address, services)
+        debug = next((s for s in related if s.service_type == "_adb-tls-connect._tcp"), None)
+        if debug:
+            address = debug.address
+        else:
+            address = click.prompt("IP:PORT on the main Wireless debugging screen (not the pairing port)",
+                                   default=address, show_default=bool(address)).strip()
+            if address.rsplit(":", 1)[0] != pairing_address.rsplit(":", 1)[0]:
+                raise click.ClickException("Debugging address belongs to a different host.")
+        click.echo(f"Connecting to {address}...")
+        try:
+            client.connect(address)
+        except RuntimeError as exc:
+            raise click.ClickException(f"Pairing succeeded, but connection failed: {exc}. Check the current debugging port and try again.") from exc
+        ready = _ready_wireless_device(client, address, services)
+        if ready:
+            return ready
+        raise click.ClickException("Pairing succeeded, but the phone is not online yet. Retry 'phonemaster devices select'.")
+    raise click.ClickException("Pairing failed after 3 attempts. Check the pairing address/code and Wi-Fi network; the previous selection was kept.")
+
+
+def _device_status(device):
+    return {
+        "device": "Ready", "unauthorized": "Needs authorization", "offline": "Offline",
+        "pairing": "Pairing available", "discovered": "Discovered; not connected",
+        "unavailable": "No longer available",
+    }.get(device.state, device.state)
+
+
+@device_commands.command(name="list")
+@click.option("--verbose", is_flag=True, help="Also show raw wireless discovery services.")
 @click.pass_context
-def devices(ctx):
+def devices(ctx, verbose):
     """List connected Android devices."""
     try:
         config = ctx.obj['config']
-        adb = ADBManager(config.adb_path)
-        
-        if not adb.check_device_connection():
-            click.echo(f"{Fore.RED}✗ No devices connected{Style.RESET_ALL}")
-            return
-        
-        click.echo(f"{Fore.GREEN}✓ Device connected{Style.RESET_ALL}")
-        click.echo(f"  Serial: {adb.device_serial}")
+        client = ADBClient(config.adb_path)
+        connected, services = _device_choices(client)
+        snapshot = Path(config.cache_dir) / "device-selection.json"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text(json.dumps([d.serial for d in connected]), encoding="utf-8")
+        rows = []
+        for device in connected:
+            client.populate_device_info(device)
+            wireless = ":" in device.serial or "._tcp" in device.serial
+            rows.append((
+                "*" if device.serial == config.device_serial else "",
+                device.display_name, "Wi-Fi" if wireless else "USB",
+                _device_status(device), device.android_version or "—", device.serial,
+            ))
+        if rows:
+            click.echo(tabulate([(i, *row) for i, row in enumerate(rows, 1)], headers=["No.", "", "Device", "Connection", "Status", "Android", "Address / Serial"]))
+            click.echo("\n* = selected device. Use 'phonemaster devices select NUMBER' to connect, pair if needed, and select.")
+        else:
+            click.echo("No devices found. Connect USB or enable wireless debugging on the same network.")
+        if any(d.state == "unauthorized" for d in connected):
+            click.echo("Needs authorization: unlock the phone and accept the debugging prompt (allow this computer).")
+        if any(row[1] == "Unknown device" for row in rows):
+            click.echo("Device names become available after authorization and connection.")
+        if any(s.service_type == "_adb-tls-pairing._tcp" for s in services):
+            click.echo("Pairing available: run 'phonemaster devices select NUMBER' and enter the phone's pairing code.")
+        if any(row[3] == "Discovered; not connected" for row in rows):
+            click.echo("Not connected: run 'phonemaster devices select NUMBER' for guided connection and pairing.")
+        if verbose and services:
+            click.echo("\nDiscovered Wi-Fi debugging services:")
+            click.echo(tabulate(
+                [(s.name, s.service_type, s.address) for s in services],
+                headers=["Name", "Service", "Address"],
+            ))
     except Exception as e:
-        click.echo(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+        raise click.ClickException(str(e)) from e
+
+
+@device_commands.command(name="select")
+@click.argument("serial", required=False, metavar="[NUMBER_OR_SERIAL]")
+@click.pass_context
+def select_device(ctx, serial):
+    """Select by list number, interactively, or by exact serial/IP:PORT."""
+    config = ctx.obj['config']
+    try:
+        client = ADBClient(config.adb_path)
+        available, services = _device_choices(client)
+        snapshot = Path(config.cache_dir) / "device-selection.json"
+        if snapshot.exists():
+            try:
+                saved = json.loads(snapshot.read_text(encoding="utf-8"))
+                if not isinstance(saved, list) or not all(isinstance(s, str) for s in saved):
+                    raise ValueError("Invalid device snapshot")
+            except (ValueError, OSError) as exc:
+                raise click.ClickException("Device numbering could not be read. Run 'phonemaster devices list' again.") from exc
+            current = {d.serial: d for d in available}
+            for service in services:
+                match = next((d for d in available if d.serial in _service_serials(service)), None)
+                if match:
+                    for alias in _service_serials(service):
+                        current.setdefault(alias, match)
+            available = [current.get(s, DeviceInfo(s, "unavailable")) for s in saved] + [
+                d for d in available if d.serial not in saved
+            ]
+        if not available:
+            raise click.ClickException("No devices found. Connect USB or pair wireless debugging first.")
+        if serial is None:
+            for device in available:
+                client.populate_device_info(device)
+            click.echo(tabulate(
+                [(i, d.display_name, _device_status(d), d.serial) for i, d in enumerate(available, 1)],
+                headers=["Number", "Device", "Status", "Address / Serial"],
+            ))
+            number = click.prompt("Select device", type=click.IntRange(1, len(available)))
+            serial = available[number - 1].serial
+        elif serial.isdecimal() and not any(d.serial == serial for d in available):
+            number = int(serial)
+            if not 1 <= number <= len(available):
+                raise click.ClickException(f"Device number must be between 1 and {len(available)}.")
+            serial = available[number - 1].serial
+        selected = next((d for d in available if d.serial == serial), None)
+        if selected is None or selected.state == "unavailable":
+            status = _device_status(selected) if selected else "Unavailable"
+            raise click.ClickException(f"Cannot select {serial}: {status}. Connect and authorize it, then run 'phonemaster devices list'.")
+        selected = _select_connect_wireless(client, selected, services)
+        serial = selected.serial
+        config.device_serial = serial
+        config.save_to_file()
+        click.echo(f"Selected device: {serial}")
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command()
+@click.argument("address")
+@click.pass_context
+def connect(ctx, address):
+    """Connect a Wi-Fi device using IP:PORT from its wireless debugging screen."""
+    try:
+        click.echo(ADBClient(ctx.obj['config'].adb_path).connect(address))
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.command()
@@ -983,7 +1212,8 @@ def _connected_adb(config):
     adb = ADBManager(config.adb_path, config.device_serial)
     if not adb.check_device_connection():
         raise click.ClickException(
-            "No authorized device connected. Unlock the phone and accept its USB-debugging prompt."
+            "No authorized device connected. Accept USB debugging or pair wireless debugging, "
+            "then run 'phonemaster devices select'."
         )
     return adb
 

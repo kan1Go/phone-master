@@ -25,8 +25,9 @@ class ADBManager:
         """Auto-detect connected device."""
         try:
             devices = self.client.get_devices()
-            if devices:
-                return devices[0].serial
+            for device in devices:
+                if device.state == "device":
+                    return device.serial
         except RuntimeError:
             pass
         return None
@@ -102,6 +103,9 @@ class ADBManager:
         """Check if device is connected."""
         try:
             devices = self.client.get_devices()
-            return len(devices) > 0
+            return any(
+                device.state == "device" and device.serial == self.device_serial
+                for device in devices
+            )
         except RuntimeError:
             return False

@@ -2,6 +2,7 @@
 
 import pytest
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -9,6 +10,281 @@ from click.testing import CliRunner
 from phone_master.cli import _scan_and_clean_local_apks, main
 from phone_master.models import AppSource
 from phone_master.config import Config
+from phone_master.adb.client import DeviceInfo, WirelessService
+
+
+def test_devices_list_includes_usb_wifi_and_offline(cli_runner):
+    with patch("phone_master.cli.ADBClient") as client:
+        client.return_value.get_devices.return_value = [
+            DeviceInfo("usb", "device", "Pixel"),
+            DeviceInfo("192.168.1.2:5555", "offline"),
+        ]
+        client.return_value.get_wireless_services.return_value = []
+        result = cli_runner.invoke(main, ["devices", "list"])
+    assert result.exit_code == 0
+    assert "usb" in result.output
+    assert "192.168.1.2:5555" in result.output
+    assert "Offline" in result.output
+
+
+def test_device_list_shows_friendly_names_and_actionable_status(cli_runner):
+    with patch("phone_master.cli.ADBClient") as client:
+        client.return_value.get_devices.return_value = [
+            DeviceInfo("192.168.1.107:43049", "device", "CPH2449", market_name="OnePlus 11", android_version="14"),
+            DeviceInfo("192.168.1.106:5555", "unauthorized"),
+        ]
+        client.return_value.get_wireless_services.return_value = [
+            WirelessService("adb-phone", "_adb-tls-connect._tcp", "192.168.1.107:43049"),
+            WirelessService("adb-other", "_adb._tcp", "192.168.1.105:5555"),
+        ]
+        result = cli_runner.invoke(main, ["devices", "list"])
+    assert result.exit_code == 0, result.output
+    assert "OnePlus 11" in result.output
+    assert "Ready" in result.output
+    assert "Needs authorization" in result.output
+    assert "accept the debugging prompt" in result.output
+    assert "Discovered; not connected" in result.output
+    assert result.output.count("192.168.1.107:43049") == 1
+    assert "_adb" not in result.output
+    assert "adb pair" not in result.output
+
+
+def test_device_list_verbose_retains_raw_services(cli_runner):
+    with patch("phone_master.cli.ADBClient") as client:
+        client.return_value.get_devices.return_value = []
+        client.return_value.get_wireless_services.return_value = [
+            WirelessService("adb-phone", "_adb-tls-pairing._tcp", "192.168.1.1:12345"),
+        ]
+        result = cli_runner.invoke(main, ["devices", "list", "--verbose"])
+    assert result.exit_code == 0
+    assert "Pairing available" in result.output
+    assert "_adb-tls-pairing._tcp" in result.output
+
+
+def test_devices_select_saves_choice_and_preserves_config(cli_runner):
+    with cli_runner.isolated_filesystem():
+        config = Config(download_dir="downloads", cache_dir="cache")
+        config.save_to_file()
+        with patch("phone_master.cli.ADBClient") as client:
+            client.return_value.get_devices.return_value = [
+                DeviceInfo("usb", "unauthorized"), DeviceInfo("wifi:5555", "device")
+            ]
+            result = cli_runner.invoke(main, ["devices", "select"], input="2\n")
+        assert result.exit_code == 0, result.output
+        saved = Config.from_file()
+        assert saved.device_serial == "wifi:5555"
+        assert saved.managed_apps == config.managed_apps
+
+
+def test_devices_select_rejects_unavailable_device(cli_runner, tmp_path):
+    with patch("phone_master.cli.ADBClient") as client, patch("phone_master.cli.Config.from_file") as config:
+        client.return_value.get_devices.return_value = [DeviceInfo("usb", "device")]
+        config.return_value.cache_dir = str(tmp_path)
+        result = cli_runner.invoke(main, ["devices", "select", "missing"])
+    assert result.exit_code != 0
+    config.return_value.save_to_file.assert_not_called()
+
+
+def test_device_numbers_preserve_last_list_order(cli_runner):
+    with cli_runner.isolated_filesystem():
+        with patch("phone_master.cli.ADBClient") as client:
+            client.return_value.get_devices.return_value = [
+                DeviceInfo("locked", "unauthorized"), DeviceInfo("wifi:5555", "device", "OnePlus 11")
+            ]
+            client.return_value.get_wireless_services.return_value = []
+            listed = cli_runner.invoke(main, ["devices", "list"])
+            assert listed.exit_code == 0, listed.output
+            assert "No." in listed.output
+            client.return_value.get_devices.return_value = [
+                DeviceInfo("wifi:5555", "device", "OnePlus 11"), DeviceInfo("locked", "unauthorized")
+            ]
+            chosen = cli_runner.invoke(main, ["devices", "select", "2"])
+            assert chosen.exit_code == 0, chosen.output
+            assert Config.from_file().device_serial == "wifi:5555"
+            rejected = cli_runner.invoke(main, ["devices", "select", "1"])
+            assert rejected.exit_code != 0
+            assert "Needs authorization" in rejected.output
+
+
+def test_number_selection_does_not_replace_disconnected_device(cli_runner):
+    with cli_runner.isolated_filesystem():
+        with patch("phone_master.cli.ADBClient") as client:
+            client.return_value.get_devices.return_value = [DeviceInfo("old", "device")]
+            client.return_value.get_wireless_services.return_value = []
+            assert cli_runner.invoke(main, ["devices", "list"]).exit_code == 0
+            client.return_value.get_devices.return_value = [DeviceInfo("new", "device")]
+            result = cli_runner.invoke(main, ["devices", "select", "1"])
+            assert result.exit_code != 0
+            assert "No longer available" in result.output
+            assert not Path(".phone-master.yaml").exists()
+
+
+def test_number_selection_rejects_discovered_and_out_of_range(cli_runner):
+    with cli_runner.isolated_filesystem():
+        with patch("phone_master.cli.ADBClient") as client:
+            client.return_value.get_devices.side_effect = lambda **kwargs: []
+            client.return_value.get_wireless_services.return_value = [
+                WirelessService("phone", "_adb._tcp", "wifi:5555")
+            ]
+            result = cli_runner.invoke(main, ["devices", "select", "1"], input="\x03")
+            assert result.exit_code != 0
+            assert "Pair device with pairing code" in result.output
+            result = cli_runner.invoke(main, ["devices", "select", "9"])
+            assert result.exit_code != 0
+            assert "between 1 and 1" in result.output
+
+
+@pytest.fixture
+def wireless_cli(tmp_path):
+    config = SimpleNamespace(adb_path="adb", cache_dir=str(tmp_path),
+                             device_serial="previous", save_to_file=Mock())
+    client = Mock()
+    client.get_wireless_services.return_value = [
+        WirelessService("phone", "_adb-tls-connect._tcp", "192.168.1.107:43049")
+    ]
+    with patch("phone_master.cli.Config.from_file", return_value=config), patch("phone_master.cli.ADBClient", return_value=client):
+        yield config, client
+
+
+def test_select_connects_without_pairing_if_already_trusted(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], [DeviceInfo("192.168.1.107:43049", "device")]]
+    result = cli_runner.invoke(main, ["devices", "select", "1"])
+    assert result.exit_code == 0, result.output
+    client.connect.assert_called_once_with("192.168.1.107:43049")
+    client.pair.assert_not_called()
+    assert config.device_serial == "192.168.1.107:43049"
+    config.save_to_file.assert_called_once()
+
+
+def test_select_guides_pairing_then_connects_and_saves(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], [], [DeviceInfo("192.168.1.107:43050", "device")]]
+    debug = client.get_wireless_services.return_value
+    client.get_wireless_services.side_effect = [debug, [
+        *debug, WirelessService("phone", "_adb-tls-pairing._tcp", "192.168.1.107:41857"),
+        WirelessService("other", "_adb-tls-pairing._tcp", "192.168.1.108:11111"),
+    ], [WirelessService("phone", "_adb-tls-connect._tcp", "192.168.1.107:43050")]]
+    client.connect.side_effect = [RuntimeError("not paired"), "connected"]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="123456\n")
+    assert result.exit_code == 0, result.output
+    assert "Pair device with pairing code" in result.output
+    assert "123456" not in result.output
+    client.pair.assert_called_once_with("192.168.1.107:41857", "123456")
+    assert client.connect.call_args.args == ("192.168.1.107:43050",)
+    assert config.device_serial == "192.168.1.107:43050"
+    config.save_to_file.assert_called_once()
+
+
+def test_select_pairing_without_mdns_prompts_for_distinct_ports(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [
+        [DeviceInfo("192.168.1.107:41857", "pairing")],
+        [DeviceInfo("192.168.1.107:43049", "device")],
+    ]
+    client.get_wireless_services.return_value = []
+    result = cli_runner.invoke(main, ["devices", "select", "1"],
+                               input="123456\n192.168.1.107:41857\n192.168.1.107:43049\n")
+    assert result.exit_code == 0, result.output
+    client.pair.assert_called_once_with("192.168.1.107:41857", "123456")
+    client.connect.assert_called_once_with("192.168.1.107:43049")
+    assert config.device_serial == "192.168.1.107:43049"
+
+
+def test_select_failed_pairing_can_retry_with_new_code(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], [], [DeviceInfo("192.168.1.107:43049", "device")]]
+    client.get_wireless_services.return_value += [
+        WirelessService("phone", "_adb-tls-pairing._tcp", "192.168.1.107:41857")
+    ]
+    client.pair.side_effect = [RuntimeError("wrong password"), "paired"]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="111111\n222222\n")
+    assert result.exit_code == 0, result.output
+    assert client.pair.call_count == 2
+    assert client.pair.call_args.args[1] == "222222"
+    assert "Reopen 'Pair device with pairing code'" in result.output
+
+
+def test_select_pairing_failure_preserves_previous_selection(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], []]
+    client.get_wireless_services.return_value += [
+        WirelessService("phone", "_adb-tls-pairing._tcp", "192.168.1.107:41857")
+    ]
+    client.pair.side_effect = RuntimeError("wrong password")
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="111111\n222222\n333333\n")
+    assert result.exit_code != 0
+    assert client.pair.call_count == 3
+    assert config.device_serial == "previous"
+    config.save_to_file.assert_not_called()
+
+
+def test_select_pairing_success_connection_failure_keeps_selection(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], []]
+    client.get_wireless_services.return_value += [
+        WirelessService("phone", "_adb-tls-pairing._tcp", "192.168.1.107:41857")
+    ]
+    client.connect.side_effect = [RuntimeError("not paired"), RuntimeError("connection refused")]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="123456\n")
+    assert result.exit_code != 0
+    assert "Pairing succeeded, but connection failed" in result.output
+    assert config.device_serial == "previous"
+    config.save_to_file.assert_not_called()
+
+
+def test_select_rejects_invalid_pairing_code_without_sending_it(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], []]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="abc\n12\n1234567\n")
+    assert result.exit_code != 0
+    assert "exactly 6 digits" in result.output
+    client.pair.assert_not_called()
+    config.save_to_file.assert_not_called()
+
+
+def test_select_cancel_pairing_preserves_selection(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], []]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="\x03")
+    assert result.exit_code != 0
+    client.pair.assert_not_called()
+    config.save_to_file.assert_not_called()
+
+
+def test_select_does_not_pair_a_different_phone(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.side_effect = [[], []]
+    result = cli_runner.invoke(main, ["devices", "select", "1"], input="123456\n192.168.1.108:41857\n")
+    assert result.exit_code != 0
+    assert "different host" in result.output
+    client.pair.assert_not_called()
+    config.save_to_file.assert_not_called()
+
+
+def test_select_usb_authorization_never_prompts_for_wifi_pairing(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.return_value = [DeviceInfo("usb", "unauthorized")]
+    result = cli_runner.invoke(main, ["devices", "select", "1"])
+    assert result.exit_code != 0
+    assert "USB debugging prompt" in result.output
+    client.pair.assert_not_called()
+    config.save_to_file.assert_not_called()
+
+
+def test_device_list_merges_ip_mdns_and_pairing_rows(cli_runner, wireless_cli):
+    config, client = wireless_cli
+    client.get_devices.return_value = [
+        DeviceInfo("192.168.1.107:43049", "device", "OnePlus 11"),
+        DeviceInfo("phone._adb-tls-connect._tcp", "device", "OnePlus 11"),
+    ]
+    client.get_wireless_services.return_value += [
+        WirelessService("phone", "_adb-tls-pairing._tcp", "192.168.1.107:41857")
+    ]
+    result = cli_runner.invoke(main, ["devices", "list"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("OnePlus 11") == 1
+    assert json.loads((Path(config.cache_dir) / "device-selection.json").read_text()) == ["192.168.1.107:43049"]
 
 
 @pytest.fixture

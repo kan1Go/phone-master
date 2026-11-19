@@ -4,6 +4,113 @@ import pytest
 from unittest.mock import patch
 
 from phone_master.adb import ADBClient, ADBManager
+from phone_master.adb.client import DeviceInfo
+
+
+def test_pair_sends_code_over_stdin_not_process_arguments():
+    from subprocess import CompletedProcess
+    output = "Enter pairing code: Successfully paired to 192.168.1.107:41857 [guid=phone]"
+    with patch("phone_master.adb.client.subprocess.run", return_value=CompletedProcess([], 0, output, "")) as run:
+        result = ADBClient().pair("192.168.1.107:41857", "123456")
+    assert "Successfully paired" in result
+    assert run.call_args.args[0] == ["adb", "pair", "192.168.1.107:41857"]
+    assert run.call_args.kwargs["input"] == "123456\n"
+    assert run.call_args.kwargs["timeout"] == 30
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_pair_reports_failure_even_with_zero_exit_code_and_redacts_code(returncode):
+    from subprocess import CompletedProcess
+    with patch("phone_master.adb.client.subprocess.run", return_value=CompletedProcess([], returncode, "Failed pairing 123456", "")):
+        with pytest.raises(RuntimeError) as error:
+            ADBClient().pair("192.168.1.107:41857", "123456")
+    assert "123456" not in str(error.value)
+    assert "Failed pairing" in str(error.value)
+
+
+def test_pair_rejects_invalid_code_before_running_adb():
+    with patch("phone_master.adb.client.subprocess.run") as run:
+        with pytest.raises(ValueError, match="6 digits"):
+            ADBClient().pair("192.168.1.107:41857", "123")
+    run.assert_not_called()
+
+
+def test_device_identity_prefers_marketing_name_and_targets_correct_phone():
+    client = ADBClient("custom-adb", "other-phone")
+    device = DeviceInfo("wifi:5555", "device", "CPH2449")
+    output = """[ro.product.brand]: [OnePlus]
+[ro.product.model]: [CPH2449]
+[ro.product.marketname]: [OnePlus 11]
+[ro.build.version.release]: [14]
+"""
+    from subprocess import CompletedProcess
+    with patch("phone_master.adb.client.subprocess.run", return_value=CompletedProcess([], 0, output, "")) as run:
+        client.populate_device_info(device)
+    assert device.display_name == "OnePlus 11"
+    assert device.android_version == "14"
+    assert run.call_args.args[0] == ["custom-adb", "-s", "wifi:5555", "shell", "getprop"]
+    assert client.device_serial == "other-phone"
+
+
+def test_device_identity_fallback_and_unauthorized_devices():
+    client = ADBClient()
+    device = DeviceInfo("usb", "device", "Pixel_8")
+    with patch.object(ADBClient, "_run_command", side_effect=RuntimeError("offline")):
+        client.populate_device_info(device)
+    assert device.display_name == "Pixel 8"
+    with patch.object(ADBClient, "_run_command") as run:
+        locked = DeviceInfo("locked", "unauthorized")
+        client.populate_device_info(locked)
+    run.assert_not_called()
+    assert locked.display_name == "Unknown device"
+
+
+def test_wireless_discovery_connects_debug_services_but_never_pairing():
+    client = ADBClient()
+    services = """List of discovered mdns services
+phone _adb-tls-connect._tcp 192.168.1.2:37895
+phone _adb-tls-connect._tcp 192.168.1.2:37895
+pair _adb-tls-pairing._tcp 192.168.1.2:40000
+old _adb._tcp. 192.168.1.3:5555
+"""
+    def run(*args, **kwargs):
+        if args == ("mdns", "services"):
+            return services
+        if args[0] == "connect":
+            return f"connected to {args[1]}"
+        return "List of devices attached\nusb device model:Pixel device:pixel\n192.168.1.2:37895 device model:Phone\n"
+    with patch.object(client, "_run_command", side_effect=run) as command:
+        devices = client.get_devices()
+    assert [(d.serial, d.model) for d in devices] == [("usb", "Pixel"), ("192.168.1.2:37895", "Phone")]
+    assert [c.args for c in command.call_args_list if c.args[0] == "connect"] == [
+        ("connect", "192.168.1.2:37895"), ("connect", "192.168.1.3:5555")
+    ]
+
+
+def test_unsupported_mdns_preserves_usb_detection():
+    with patch.object(ADBClient, "_run_command", side_effect=[
+        RuntimeError("unknown command mdns"), "List of devices attached\nusb device\n"
+    ]):
+        assert ADBClient().get_devices()[0].serial == "usb"
+
+
+def test_failed_wifi_connection_preserves_usb_detection():
+    with patch.object(ADBClient, "_run_command", side_effect=[
+        "phone _adb-tls-connect._tcp 192.168.1.2:1234",
+        "failed to connect", "List of devices attached\nusb device\n"
+    ]):
+        assert ADBClient().get_devices()[0].serial == "usb"
+
+
+def test_manager_skips_unauthorized_and_checks_selected_device():
+    with patch.object(ADBClient, "get_devices", return_value=[
+        DeviceInfo("usb", "unauthorized"), DeviceInfo("wifi:5555", "device")
+    ]):
+        manager = ADBManager()
+        assert manager.device_serial == "wifi:5555"
+        assert manager.check_device_connection()
+        selected = ADBManager(device_serial="missing")
+        assert not selected.check_device_connection()
 
 
 @pytest.fixture

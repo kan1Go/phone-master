@@ -46,7 +46,13 @@ pip install -e .
 
 ### 1. Check Device Connection
 ```bash
-phonemaster devices
+phonemaster devices list
+
+# Select a connected USB or Wi-Fi device for subsequent commands
+phonemaster devices select
+
+# Or select a number from the most recent device list
+phonemaster devices select 2
 ```
 
 ### 2. Scan for Updates
@@ -183,9 +189,45 @@ managed_apps:
 # List connected devices
 adb devices
 
-# Connect wirelessly (if device supports it)
-adb connect <device-ip>:5555
+# Discover USB devices and advertised Wi-Fi debugging devices
+phonemaster devices list
+
+# Select a number and connect/pair with on-screen guidance
+phonemaster devices select 2
+
+# Or select interactively, or supply a discovered Wi-Fi endpoint
+phonemaster devices select
+phonemaster devices select <device-ip>:<debug-port>
 ```
+
+The phone and computer must share a network. Phone Master discovers wireless
+ADB services through `adb mdns services` and attempts to connect to debugging
+endpoints, while retaining USB detection if mDNS is unavailable. Selecting a
+wireless device first attempts to connect. If it is not online, Phone Master
+guides you to **Developer options > Wireless debugging > Pair device with pairing
+code** and asks for the six-digit code. Keep that phone screen open. The program
+discovers the pairing port, pairs, reconnects using the debugging port, and checks
+that the phone is online before saving the selection. If discovery is unavailable,
+it asks for the IP and port shown on the phone; pairing and debugging ports differ.
+Codes are entered without echo and are not saved. Failed pairing can be retried
+up to three times; cancellation or connection failure keeps the previous selection.
+USB devices instead require accepting the phone's debugging authorization prompt.
+Older TCP/IP debugging devices can use port 5555 when enabled.
+Only successfully connected, authorized devices are saved. The selection is saved as
+`device_serial` in the current directory's `.phone-master.yaml` and used by
+subsequent app and dictionary commands. Offline or unauthorized devices remain
+visible in `devices list`.
+
+Device lists and the selection menu show friendly device names (preferring the
+phone's marketing name, such as OnePlus 11), connection type, readable status,
+and Android version. Device names require an authorized ADB connection; devices
+that have only been discovered are shown as `Unknown device` until connected.
+Use `phonemaster devices list --verbose` to include raw mDNS service details.
+Every device row has a number, including devices that are not ready. Run
+`phonemaster devices select 2` to select row 2, or run `phonemaster devices select`
+and enter the number at the prompt. Numbers are preserved from the last list
+in the configured cache directory. Selection checks that the same device
+can be connected and authorized; run `devices list` again to refresh numbering.
 
 ## Architecture
 

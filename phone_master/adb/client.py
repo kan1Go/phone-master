@@ -16,6 +16,27 @@ class DeviceInfo:
     model: str = ""
     device_name: str = ""
     android_version: str = ""
+    brand: str = ""
+    market_name: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """Prefer the device's own marketing name over its hardware model code."""
+        name = (self.market_name or self.model).replace("_", " ").strip()
+        brand = self.brand.strip()
+        if not name:
+            return "Unknown device"
+        if brand and not name.lower().startswith(brand.lower()):
+            return f"{brand} {name}"
+        return name
+
+
+@dataclass
+class WirelessService:
+    """An ADB service advertised on the local network."""
+    name: str
+    service_type: str
+    address: str
 
 
 class ADBClient:
@@ -31,7 +52,7 @@ class ADBClient:
         self.adb_path = adb_path
         self.device_serial = device_serial
     
-    def _run_command(self, *args: str, timeout: int = 30) -> str:
+    def _run_command(self, *args: str, timeout: int = 30, input_text: Optional[str] = None) -> str:
         """Run ADB command and return output.
 
         Args:
@@ -56,6 +77,7 @@ class ADBClient:
                 cmd,
                 capture_output=True,
                 text=True,
+                input=input_text,
                 timeout=timeout
             )
             
@@ -71,8 +93,57 @@ class ADBClient:
         except FileNotFoundError:
             raise RuntimeError(f"ADB executable not found at: {self.adb_path}")
     
-    def get_devices(self) -> List[DeviceInfo]:
-        """Get list of connected devices."""
+    def get_wireless_services(self) -> List[WirelessService]:
+        """Discover wireless debugging services; older ADB versions may lack mDNS."""
+        try:
+            output = self._run_command("mdns", "services", timeout=5)
+        except RuntimeError:
+            return []
+        services = []
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) == 3:
+                service_type = parts[1].rstrip(".")
+                if service_type in {"_adb._tcp", "_adb-tls-connect._tcp", "_adb-tls-pairing._tcp"}:
+                    services.append(WirelessService(parts[0], service_type, parts[2]))
+        return services
+
+    def connect(self, address: str) -> str:
+        """Connect to a wireless ADB endpoint, including textual ADB failures."""
+        if not address.strip() or address.startswith("-") or any(c.isspace() for c in address):
+            raise ValueError("Use a device IP address or hostname, optionally followed by :port")
+        output = self._run_command("connect", address, timeout=5)
+        if not output.lower().startswith(("connected to ", "already connected to ")):
+            raise RuntimeError(output or "Wireless ADB connection failed")
+        return output
+
+    def pair(self, address: str, code: str) -> str:
+        """Pair with a phone without putting its temporary code in process arguments."""
+        if not re.fullmatch(r"\S+:\d+", address) or address.startswith("-"):
+            raise ValueError("Use the IP:PORT shown in 'Pair device with pairing code'")
+        if not re.fullmatch(r"[0-9]{6}", code):
+            raise ValueError("The Wi-Fi pairing code must contain exactly 6 digits")
+        try:
+            output = self._run_command("pair", address, timeout=30, input_text=code + "\n")
+        except RuntimeError as exc:
+            raise RuntimeError(str(exc).replace(code, "******")) from None
+        if "successfully paired to " not in output.lower():
+            raise RuntimeError((output or "Wireless ADB pairing failed").replace(code, "******"))
+        return output.replace(code, "******")
+
+    def get_devices(self, discover_wireless: bool = True) -> List[DeviceInfo]:
+        """List USB/network devices, optionally connecting advertised Wi-Fi endpoints."""
+        if discover_wireless:
+            attempted = set()
+            for service in self.get_wireless_services():
+                if service.service_type == "_adb-tls-pairing._tcp" or service.address in attempted:
+                    continue
+                attempted.add(service.address)
+                try:
+                    self.connect(service.address)
+                except RuntimeError:
+                    # An unpaired/unreachable phone must not hide working USB devices.
+                    pass
         output = self._run_command("devices", "-l")
         devices = []
         
@@ -81,9 +152,32 @@ class ADBClient:
                 parts = line.split()
                 if len(parts) >= 2:
                     device_info = DeviceInfo(serial=parts[0], state=parts[1])
+                    for part in parts[2:]:
+                        if part.startswith("model:"):
+                            device_info.model = part.partition(":")[2]
+                        elif part.startswith("device:"):
+                            device_info.device_name = part.partition(":")[2]
                     devices.append(device_info)
         
         return devices
+
+    def populate_device_info(self, device: DeviceInfo) -> None:
+        """Read friendly names only from authorized devices, with a short timeout."""
+        if device.state != "device":
+            return
+        target = ADBClient(self.adb_path, device.serial)
+        try:
+            output = target._run_command("shell", "getprop", timeout=5)
+        except RuntimeError:
+            return
+        properties = dict(re.findall(r"^\[([^]]+)\]: \[([^\r\n]*)\]$", output, re.MULTILINE))
+        device.brand = properties.get("ro.product.brand", "")
+        device.model = properties.get("ro.product.model") or device.model
+        device.android_version = properties.get("ro.build.version.release", "")
+        device.market_name = next((properties[key] for key in (
+            "ro.product.marketname", "ro.product.vendor.marketname",
+            "ro.vendor.oplus.market.name", "ro.config.marketing_name",
+        ) if properties.get(key)), "")
     
     def get_installed_packages(self, third_party_only: bool = True) -> List[str]:
         """Get list of installed packages.
